@@ -1,0 +1,72 @@
+Canonical research core
+
+geometry/
+  mesh.py           block / spherical-bottom cap nodes, tets and boundary topology
+  primitives.py     plane/sphere/cylinder/ellipsoid/saddle samples
+  surface.py        reference quadrature, nodal area weights, deformed normals
+  rimls.py          scalar/batched differentiable IMLS/RIMLS gaps
+  contact_patches.py BVH candidates -> deduplicated quadrature/target patches
+mechanics/
+  solid.py          linear tetrahedral material, stiffness and volumes
+  cloth.py          reserved interface; explicitly not implemented
+collision/
+  ipc_toolkit.py    official BVH/CCD client for explicit surface meshes
+  _worker.py        isolated ipctk process (never imports PyTorch)
+contact/
+  barrier.py        barrier value/derivatives
+  terms.py          weighted multi-gap energy, force gradient, dense/sparse Hessian
+  objective.py      single-gap research objective interface
+optimization/
+  newton.py         dense/sparse directions, stabilization, Armijo, optional CCD cap
+  baseline.py       Full/GN/filtered GN/expanded GN/BFGS/L-BFGS comparisons
+  sr1.py            single-gap research solvers and local multi-gap SR1 histories
+  line_search.py    comparison solver line search
+  timing.py         optional independent phase timing
+simulation/
+  two_body.py       coupled FEM problem, BCs, replaceable manual/automatic contact
+  compression.py    quasi-static load continuation and unsaved animation
+  integration.py    inertial potential helper (not a full dynamics driver)
+  hertz.py          finite-cap FEM/barrier verification against Hertz half-space
+
+Entry from project root:
+  python run.py hertz --show
+  python run.py two-body --steps 20 --methods full gn filtered_gn sr1_gap --show
+  python run.py two-body --steps 20 --methods gn --show
+  python run.py two-body --collision none --steps 2 --methods gn
+  python run.py two-body --dense --collision none --steps 2 --methods gn
+Optional install: python -m pip install -e ".[collision,visualization]"
+No editable install is needed when using run.py. Import example: from src.geometry.surface import make_surface_sampler.
+Source package is independently
+installable: it imports no fem2d/fem3d or old ipc modules.
+
+FEM3D is an independent reference implementation, not an alias of src.
+Existing FEM3D experiments and result folders remain at their original paths.
+Canonical package has no dependency on the legacy packages.
+
+Automatic contact (src only):
+  python run.py two-body --contact auto --steps 20 --methods gn --show
+  python run.py two-body --contact manual --steps 20 --methods gn --show
+  With --collision none, default contact is manual; explicit auto requires ipctk.
+  --skin .1 sets extra search range beyond d_hat and the conservative motion cap.
+  Opposing-facing smooth patches selected per quadrature query/target body;
+  connected components come from reference face geometry, not hardcoded top/bottom.
+  One target patch per body is a prototype choice; complex folds need further work.
+  Selection is outside AD and frozen inside line search. Patch changes and energy
+  differences are recorded. No global smoothness guarantee is claimed.
+
+Automatic-contact validation: planar two-block Full/GN/filtered-GN solutions
+match manual face selection within 3.1e-10 in coordinates. Patch energy jumps
+were zero in this compression case. Tests cover noncontiguous surface-id maps,
+FV/EE deduplication, release/recontact after lateral separation, fixed-patch
+finite-difference derivatives and independent patch state per solver method.
+
+Multi-gap Gap SR1 (two-body):
+  --methods sr1_gap selects the integrated method; --sr1-memory 5 bounds the
+  recent accepted secant pairs retained per active query/target pair.
+  Active GN Jacobian rows are reused, with no exact gap Hessian evaluation.
+  Local supports include complete target patches and the query face.
+  Inactive/replaced contacts and changed supports/weights drop old history.
+  Histories restart at every load increment because prescribed BCs change.
+  Only the Hessian is corrected. Energy, gradient, CCD and line search are shared.
+  Sparse corrections are assembled explicitly; this is not a matrix-free solver.
+  See the final section of SRC_OPTIMIZATION.md for validation and limitations.

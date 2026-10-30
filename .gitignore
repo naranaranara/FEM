@@ -1,0 +1,22 @@
+# Track the independent src package; retain historical research trees locally.
+/*
+!/.gitignore
+!/README.md
+!/pyproject.toml
+!/run.py
+!/src/
+!/tests/
+/tests/*
+!/tests/test_automatic_contact.py
+!/tests/test_subset_contact.py
+!/tests/test_hertz_contact.py
+!/tests/test_src_multi_gap_sr1.py
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/

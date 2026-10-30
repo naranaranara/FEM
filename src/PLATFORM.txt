@@ -1,0 +1,70 @@
+Platform decision (2026-10-29)
+Selected: Python/PyTorch/SciPy research core + official IPC Toolkit 1.3.0 collision backend.
+This is a modular research stack, NOT a replacement FEM engine supplied by IPC Toolkit.
+
+Selection criterion: retain direct control of RIMLS energy, signed curvature corrections,
+Newton directions, stabilization and line search; reuse mature triangle collision detection.
+
+Local evidence:
+- Existing environment: Python 3.8, torch 1.9.0+cpu, scipy 1.10.1, ipctk 1.3.0.
+- Hardware read-only check: RTX 3090 devices, NVIDIA driver 560.94.
+- Actual official BVH candidate test: more candidates when two triangles approach.
+- Actual official CCD test: separated triangles can approach; a crossing trajectory
+  is capped before collision. Worker process termination is tested.
+- Actual two-body equilibrium: CCD-guarded and unguarded solutions agree within 1e-12.
+- No installation, runtime or speed claims for SOFA or libuipc are made.
+
+Why not select the alternatives for this stage:
+SOFA: official Python ForceField extension points exist, but preservation of the
+current energy-minimization loop, two-body coupling and Hessian replacement has not
+been demonstrated here. Consider it if broader mechanics models become necessary.
+libuipc: Windows GPU wheels and FEM/cloth/thread scenes exist. Its public contact
+configuration selects built-in IPC/AL-IPC pipelines; a direct Python callback for
+our RIMLS Hessian has not been verified. Custom backend work and a newer Python
+runtime would be a separate integration project, not a drop-in replacement.
+These are integration-risk decisions, not conclusions that either platform cannot work.
+
+Official sources inspected:
+https://github.com/ipc-sim/ipc-toolkit
+https://pypi.org/project/ipctk/1.3.0/
+https://github.com/sofa-framework/SofaPython3/blob/master/examples/emptyForceField.py
+https://sofa-framework.github.io/doc/simulation-principles/multi-model-representation/forcefield/
+https://github.com/spiriMirror/libuipc
+https://spirimirror.github.io/libuipc-doc/specification/scene_configs/contact/
+
+Native isolation: existing torch 1.9 and ipctk have a native-library conflict noted
+in the previous IPC adapter. IPC runs in a persistent child importing no torch.
+Only trusted local numeric messages are exchanged; the worker is not a network service.
+
+Boundary of the current implementation:
+- BVH/CCD acts on explicit boundary triangles and linear nodal trajectories.
+- It does NOT prove nonintersection of the reconstructed RIMLS zero surface.
+- The CLI now defaults to BVH-selected patches when IPC Toolkit is enabled.
+  FV/EE incidence maps to full face/vertex ids; per-query/per-target-body choices
+  are deduplicated. Reference smooth-face groups avoid averaging box corners.
+  --contact manual retains the original prescribed-face comparison path.
+- Patches refresh before each Newton linearization and stay fixed during line search.
+  A skin/4 nodal-motion cap limits motion between discoveries. Patch-energy jumps
+  are logged; hard patch selection does not guarantee a globally smooth energy.
+- General folded surfaces, crease transitions and self-contact are not validated.
+- Cross-body collision enabled; self-contact path is not validated by these tests.
+- Solid is small-strain linear tetrahedral FEM. Cloth raises NotImplementedError.
+- CLI is quasi-static, not a dynamic simulation. integration.py supplies the
+  backward-Euler inertial potential only; mass/time-step driver remains future work.
+- Gap SR1 now supports the src two-body multi-gap path (--methods sr1_gap),
+  with local limited-memory histories and existing BVH/CCD safeguards.
+  Small planar FEM equilibrium is verified; curved multi-body acceleration
+  and large-scale matrix-free solves are not yet validated.
+- Sparse FEM/scatter is implemented; dense contact-surface AD blocks remain.
+
+Selection probes used memory/stdout only; no candidate-result images, videos,
+CSV files or downloaded framework trees are retained. Existing research result
+folders and frozen experiments/baselines are not selection artifacts and remain untouched.
+
+Final verification: 109 tests passed. BVH probe candidates: far=0, near=15
+(6 face-vertex + 9 edge-edge). Safe trajectory alpha=1.0; crossing trajectory
+alpha=0.49994659423828125, before the analytic crossing at alpha=0.5.
+
+Code ownership: src and fem3d are independent implementations. FEM3D has been
+restored to its own computations, with no src imports or delegation. Source
+folder flattening places geometry/mechanics/etc directly under src.
