@@ -27,7 +27,9 @@ dist/
 !/tests/test_structured_bfgs.py
 !/experiments/
 /experiments/*
-!/experiments/CYLINDER_VALIDATION.md
 !/experiments/cylinder_validation_results/
 /experiments/cylinder_validation_results/*
 !/experiments/cylinder_validation_results/2026-10-31_130924/
+
+# Keep research reports local.
+/experiments/cylinder_validation_results/**/REPORT.md
