@@ -218,9 +218,10 @@ def rimls_values_torch(queries, points, normals, R, sigma_r=.5, sigma_n=.5):
     # 텐서 매개변수의 미분과 기존 PyTorch 변환은 일반 계산 그래프에 맡겨요.
     tensor_scales = any(torch.is_tensor(scale) for scale in (R, sigma_r, sigma_n))
     transforms_active = getattr(torch._C, '_are_functorch_transforms_active', lambda: False)()
+    # ##r## PyTorch 1.9 returns a tuple; newer named tuples also support [1].
     forward_ad = getattr(torch.autograd, 'forward_ad', None)
     dual_inputs = forward_ad is not None and any(
-        forward_ad.unpack_dual(value).tangent is not None for value in (queries, points, normals))
+        forward_ad.unpack_dual(value)[1] is not None for value in (queries, points, normals))
     inputs = (queries, points, normals) + tuple(
         scale for scale in (R, sigma_r, sigma_n) if torch.is_tensor(scale))
     needs_reverse = torch.is_grad_enabled() and any(value.requires_grad for value in inputs)

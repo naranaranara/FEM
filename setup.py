@@ -4,7 +4,7 @@ import sys
 from setuptools import Extension, setup
 
 
-compile_args = ["/O2", "/std:c++17"] if sys.platform == "win32" else ["-O3", "-std=c++17"]
+compile_args = ["/O2", "/std:c++17", "/utf-8"] if sys.platform == "win32" else ["-O3", "-std=c++17"]
 setup(ext_modules=[Extension(
     "src.geometry._rimls_native",
     ["src/geometry/_rimls_native.cpp"],

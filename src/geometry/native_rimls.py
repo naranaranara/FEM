@@ -51,9 +51,10 @@ def _supported(queries, points, normals, scales):
         return False
     if getattr(torch._C, '_are_functorch_transforms_active', lambda: False)():
         return False
+    # ##r## PyTorch 1.9 returns a tuple; newer named tuples also support [1].
     forward_ad = getattr(torch.autograd, 'forward_ad', None)
     return forward_ad is None or not any(
-        forward_ad.unpack_dual(value).tangent is not None for value in inputs)
+        forward_ad.unpack_dual(value)[1] is not None for value in inputs)
 
 
 def try_native_rimls(queries, points, normals, R, sigma_r, sigma_n):
