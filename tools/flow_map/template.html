@@ -1,0 +1,912 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RIMLS 접촉 실행 흐름</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<script>
+window.MathJax={tex:{},svg:{fontCache:'local'},startup:{typeset:false,ready(){MathJax.startup.defaultReady();MathJax.startup.promise.then(()=>{window.__mjReady&&window.__mjReady()})}}};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<style>
+/* Layout: swimlane flow map — columns say WHO runs, horizontal bands say WHEN — beside a sticky inspector, read like a HUD on graphite. */
+:root{
+  --bg:#0c0e11; --bg-2:#111419; --surface:#151920; --surface-2:#1c2129;
+  --lane:#10141a; --line:#242a33; --line-2:#363f4b; --grid:#1a1f26;
+  --fg:#e9e5db; --muted:#9098a4; --faint:#5f6773;
+  --accent:#f2c98a; --accent-ink:#1b1408; --accent-dim:#6b5a3c;
+  --c-el:#86acd9; --c-hq:#e6d3a8; --c-ct:#e39a6c; --c-wk:#aa9de6;
+  --ok:#93cf8c; --bad:#e8786e;
+  --font-ui:"IBM Plex Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){
+  --bg:#f2f3f5; --bg-2:#ffffff; --surface:#ffffff; --surface-2:#fbf6ec;
+  --lane:#eceef1; --line:#d9dde3; --line-2:#b8c0ca; --grid:#e1e4e9;
+  --fg:#181b20; --muted:#58616d; --faint:#8a929d;
+  --accent:#a6620a; --accent-ink:#ffffff; --accent-dim:#d9b98a;
+  --c-el:#2b61a1; --c-hq:#7c5a16; --c-ct:#b3502a; --c-wk:#5d4abd;
+  --ok:#2e8a3a; --bad:#c0392b; color-scheme:light}}
+:root[data-theme="light"]{
+  --bg:#f2f3f5; --bg-2:#ffffff; --surface:#ffffff; --surface-2:#fbf6ec;
+  --lane:#eceef1; --line:#d9dde3; --line-2:#b8c0ca; --grid:#e1e4e9;
+  --fg:#181b20; --muted:#58616d; --faint:#8a929d;
+  --accent:#a6620a; --accent-ink:#ffffff; --accent-dim:#d9b98a;
+  --c-el:#2b61a1; --c-hq:#7c5a16; --c-ct:#b3502a; --c-wk:#5d4abd;
+  --ok:#2e8a3a; --bad:#c0392b; color-scheme:light}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:400 14px/1.6 var(--font-ui);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 40px}
+code,.mono{font-family:var(--font-mono)}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.top{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;max-width:1560px;margin-inline:auto}
+.eyebrow{font:500 10.5px/1.4 var(--font-mono);letter-spacing:.16em;color:var(--muted);text-transform:uppercase}
+.eyebrow b{color:var(--accent);font-weight:600}
+h1{margin:6px 0 6px;font:600 28px/1.2 var(--font-ui);letter-spacing:-.01em;text-wrap:balance}
+.lede{margin:0;max-width:68ch;color:var(--muted)}
+.lede code{color:var(--fg);font-size:12.5px}
+.controls{display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-start;align-items:center}
+.btns{display:flex;gap:6px;flex-wrap:wrap}
+.btn{border:1px solid var(--line-2);background:var(--bg-2);padding:7px 12px;border-radius:4px;cursor:pointer;font-size:13px;white-space:nowrap}
+.btn:hover{border-color:var(--fg)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600;min-width:104px}
+.seg{display:flex;border:1px solid var(--line-2);border-radius:4px;overflow:hidden}
+.seg .lab{font:500 10px var(--font-mono);letter-spacing:.12em;color:var(--faint);padding:8px 8px 0 10px;text-transform:uppercase}
+.seg button{border:0;background:transparent;padding:7px 10px;cursor:pointer;font:500 12px var(--font-mono);color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--surface-2);color:var(--accent)}
+.seg button:hover{color:var(--fg)}
+
+.hud{max-width:1560px;margin:18px auto 14px;display:flex;flex-wrap:wrap;gap:0;border-block:1px solid var(--line)}
+.kv{display:flex;flex-direction:column;padding:8px 16px 8px 0;margin-right:16px;border-right:1px solid var(--line);min-width:0}
+.kv:last-child{border-right:0}
+.kv .k{font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);text-transform:uppercase}
+.kv .v{font:500 15px var(--font-mono);font-variant-numeric:tabular-nums;color:var(--fg)}
+.kv .v.flash{color:var(--accent)}
+
+.layout{max-width:1560px;margin-inline:auto;display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px;align-items:start}
+.stage{min-width:0}
+.diagram-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg-2)}
+#map{display:block;width:100%;height:auto;min-width:880px}
+
+.timeline{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;margin-top:12px}
+.timeline .lab{font:500 10px var(--font-mono);letter-spacing:.12em;color:var(--faint)}
+.track{position:relative;padding-top:2px}
+#scrub{width:100%;accent-color:var(--accent);margin:0}
+.ticks{position:relative;height:16px}
+.ticks span{position:absolute;top:0;transform:translateX(-50%);font:500 9.5px var(--font-mono);color:var(--faint);white-space:nowrap;padding-top:5px}
+.ticks span::before{content:'';position:absolute;left:50%;top:0;width:1px;height:4px;background:currentColor}
+.ticks span.quiet{font-size:0}
+.ticks span.on{color:var(--accent)}
+#evc{font:500 11px var(--font-mono);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.below{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:16px;margin-top:14px}
+.console{background:var(--bg-2);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font:400 11.5px/1.7 var(--font-mono);min-height:168px;overflow-x:auto}
+.console .ln{white-space:nowrap;color:var(--faint)}
+.console .ln b{font-weight:500;color:var(--muted)}
+.console .ln.cur{color:var(--fg)}
+.console .ln.cur b{color:var(--accent)}
+.console .hd{font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);margin-bottom:4px}
+.legend{border:1px solid var(--line);border-radius:6px;padding:10px 14px;display:grid;gap:7px;align-content:start;font-size:12.5px;color:var(--muted)}
+.legend .hd{font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint)}
+.legend .row{display:flex;gap:10px;align-items:center}
+.legend svg{flex:none}
+.sw{width:10px;height:10px;border-radius:2px;flex:none}
+
+.charts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:16px}
+.card{border:1px solid var(--line);border-radius:6px;background:var(--bg-2);padding:12px 14px 10px;min-width:0}
+.card .hd{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.card .hd .t{font:600 13px var(--font-ui)}
+.card .hd .k{font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);text-transform:uppercase}
+.card svg{display:block;width:100%;max-width:520px;height:auto;margin:6px auto 0}
+.card .note{margin:4px 0 0;font-size:12px;color:var(--muted)}
+
+.inspector{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto;display:grid;gap:12px;align-content:start;padding-bottom:4px}
+.panel{border:1px solid var(--line);border-radius:6px;background:var(--bg-2);padding:14px 16px;min-width:0}
+.ptitle{display:flex;justify-content:space-between;align-items:center;font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:8px}
+.route{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.pill{font:500 11.5px var(--font-mono);padding:2px 8px;border:1px solid var(--line-2);border-radius:3px;white-space:nowrap}
+.pill.pay{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.pill.kind{border:0;padding:2px 0;color:var(--faint);font-size:10px;letter-spacing:.1em}
+.arrow{color:var(--faint)}
+#now-text{margin:0;font-size:14.5px;line-height:1.65}
+#now-text code{font-size:12.5px;color:var(--accent)}
+.nodecard h2{margin:0;font:600 17px/1.3 var(--font-mono);overflow-wrap:anywhere}
+.nodecard .role{margin:2px 0 0;font:600 14px var(--font-ui);color:var(--accent)}
+.nodecard .file{margin:6px 0 0;font:400 11.5px var(--font-mono);color:var(--muted);overflow-wrap:anywhere}
+.nodecard .lane-tag{display:inline-flex;align-items:center;gap:6px;font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);text-transform:uppercase}
+.nodecard p.does{margin:12px 0 0;font-size:13.5px}
+.io{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;margin:12px 0 0;font-size:12.5px}
+.io dt{font:500 9.5px/1.9 var(--font-mono);letter-spacing:.14em;color:var(--faint)}
+.io dd{margin:0;color:var(--fg);overflow-wrap:anywhere}
+.eqs{display:grid;gap:10px;margin-top:14px}
+.eq{border-top:1px solid var(--line);padding-top:8px;min-width:0}
+.eq .tex{overflow-x:auto;overflow-y:hidden;color:var(--fg);padding:2px 0}
+.eq mjx-container[display="true"]{margin:0!important;text-align:left!important}
+.eq .cap{font-size:12px;color:var(--muted);margin-top:2px}
+mjx-assistive-mml{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(1px,1px,1px,1px)!important}
+.tex-fallback{font:400 12px var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg)}
+.mech{margin:14px 0 0;padding:10px 12px;border:1px dashed var(--line-2);border-radius:4px;font-size:13px}
+.mech b{font:500 9.5px var(--font-mono);letter-spacing:.14em;color:var(--faint);display:block;margin-bottom:2px}
+.live{margin:12px 0 0;font:500 12px var(--font-mono);color:var(--accent)}
+.unpin{border:1px solid var(--line-2);background:transparent;border-radius:3px;padding:1px 8px;cursor:pointer;font:500 10px var(--font-mono);letter-spacing:.08em;color:var(--muted)}
+.unpin:hover{color:var(--fg);border-color:var(--fg)}
+.off-note{margin:10px 0 0;font-size:12.5px;color:var(--bad)}
+
+/* map */
+.lane-bg{fill:var(--lane)}
+.lane-wk{fill:var(--lane);stroke:var(--line-2);stroke-dasharray:3 4}
+.lane-top{stroke-width:2}
+.lane-h1{font:600 10.5px var(--font-mono);letter-spacing:.16em;fill:var(--muted)}
+.lane-h2{font:500 12px var(--font-ui);fill:var(--fg)}
+.band{stroke:var(--line-2);stroke-dasharray:2 5}
+.band-t{font:500 9.5px var(--font-mono);letter-spacing:.14em;fill:var(--faint)}
+.frame{fill:none;stroke:var(--line-2)}
+.frame.newton{stroke:var(--accent-dim)}
+.ftab-bg{fill:var(--bg-2)}
+.ftab{font:600 9.5px var(--font-mono);letter-spacing:.14em;fill:var(--muted)}
+.ftab.newton{fill:var(--accent)}
+.vlab{font:500 9px var(--font-mono);letter-spacing:.12em;fill:var(--faint)}
+.dots{fill:var(--grid)}
+.node{cursor:pointer}
+.node .box{fill:var(--surface);stroke:var(--line-2);stroke-width:1;transition:stroke .25s,fill .25s}
+.node .nm{font:500 13px var(--font-mono);fill:var(--fg)}
+.node .rl{font:400 11.5px var(--font-ui);fill:var(--muted)}
+.node .crn{fill:none;stroke-width:1.8}
+.node.el .crn{stroke:var(--c-el)} .node.hq .crn{stroke:var(--c-hq)} .node.ct .crn{stroke:var(--c-ct)} .node.wk .crn{stroke:var(--c-wk)}
+.node:hover .box{stroke:var(--fg)}
+.node.seen .box{stroke:var(--accent-dim)}
+.node.active .box{stroke:var(--accent);fill:var(--surface-2);filter:url(#glow)}
+.node.pinned .box{stroke:var(--fg);stroke-dasharray:5 3}
+.node.off{opacity:.3}
+.node:focus{outline:none}
+.node:focus-visible .box{stroke:var(--accent);stroke-width:2}
+.badge rect{fill:var(--bg-2);stroke:var(--line-2)}
+.badge text{font:500 10px var(--font-mono);fill:var(--muted);font-variant-numeric:tabular-nums}
+.node.active .badge rect{stroke:var(--accent)}
+.node.active .badge text{fill:var(--accent)}
+.edge path{fill:none;stroke:var(--line-2);stroke-width:1.2;transition:stroke .3s}
+.edge polygon{fill:var(--line-2)}
+.edge.loop path{stroke-dasharray:5 4}
+.edge.exit path{stroke:var(--ok);stroke-opacity:.55}
+.edge.exit polygon{fill:var(--ok);fill-opacity:.55}
+.edge.trail path{stroke:var(--accent-dim);stroke-width:1.6}
+.edge.trail polygon{fill:var(--accent-dim)}
+.edge.near path{stroke:var(--fg)}
+.edge.hot path{stroke:var(--accent);stroke-width:2.2;stroke-opacity:1}
+.edge.hot polygon{fill:var(--accent);fill-opacity:1}
+.edge.off{opacity:.2}
+.glow-flood{flood-color:var(--accent);flood-opacity:.6}
+.pk-halo{fill:var(--accent);opacity:.25}
+.pk-core{fill:var(--accent);stroke:var(--accent);stroke-width:2}
+.pk-core.req{fill:var(--bg-2)}
+.chip rect{fill:var(--accent)}
+.chip text{font:600 10.5px var(--font-mono);fill:var(--accent-ink)}
+.tb rect{fill:none;stroke:var(--line-2)}
+.tb line{stroke:var(--line-2)}
+.tb .a{font:600 10px var(--font-mono);letter-spacing:.1em;fill:var(--fg)}
+.tb .b{font:400 9.5px var(--font-mono);fill:var(--muted)}
+.tb .c{font:500 8.5px var(--font-mono);letter-spacing:.14em;fill:var(--faint)}
+
+/* charts */
+.ax{stroke:var(--line-2)} .gl{stroke:var(--line);stroke-dasharray:2 4}
+.tk{font:400 9.5px var(--font-mono);fill:var(--faint)}
+.tol{stroke:var(--ok);stroke-dasharray:4 3;stroke-opacity:.8}
+.tol-t{font:500 9px var(--font-mono);fill:var(--ok)}
+.ser{fill:none;stroke:var(--accent);stroke-width:1.6}
+.ghost{fill:none;stroke:var(--line-2);stroke-width:1.2;stroke-dasharray:2 3}
+.pt{fill:var(--accent)} .pt.g{fill:var(--line-2)} .pt.zero{fill:var(--bg-2);stroke:var(--accent);stroke-width:1.5}
+.pt.cur{fill:var(--fg);stroke:var(--accent);stroke-width:2}
+.sep{stroke:var(--line);}
+.vt{font:500 10px var(--font-mono);fill:var(--accent)}
+.blk{fill:var(--surface-2);stroke:var(--line-2)}
+.blk.up{stroke:var(--c-el)} .blk.lo{stroke:var(--c-el)}
+.hatch{stroke:var(--faint);stroke-width:1}
+.zone{fill:var(--accent);opacity:.08}
+.zone.hit{opacity:.28}
+.dim{stroke:var(--muted);stroke-width:1}
+.dim-t{font:500 9.5px var(--font-mono);fill:var(--fg)}
+.dim-t.m{fill:var(--muted)}
+.push{stroke:var(--accent);stroke-width:1.6;fill:none}
+.push-h{fill:var(--accent)}
+
+@media (max-width:1180px){
+  .layout{grid-template-columns:minmax(0,1fr)}
+  .inspector{position:static;max-height:none}
+}
+@media (max-width:900px){
+  .below{grid-template-columns:minmax(0,1fr)}
+  .charts{grid-template-columns:minmax(0,1fr)}
+  h1{font-size:24px}
+}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <div class="eyebrow">FEM / RIMLS CONTACT · REV <b id="rev">—</b> · RECORDED <span id="rec">—</span> · 29 NODES · 33 LINKS · 4 LANES</div>
+    <h1>실행 흐름 지도</h1>
+    <p class="lede"><code>run.py two-body</code>와 같은 블록 압축 시뮬레이션을 헤시안 방식마다 실제로 실행하면서 기록한 호출 순서와 값을 그대로 재생해요 (기록 명령 <code id="cmd">build_flow_map.py</code>). 열은 <b>누가</b> 계산하는지, 가로 띠는 <b>언제</b> 계산하는지예요. 노드를 누르면 그 함수가 하는 일과 수식이 세부 정보 패널에 나와요.</p>
+  </div>
+  <div class="controls">
+    <div class="btns">
+      <button class="btn primary" id="play" type="button">▶ 실행</button>
+      <button class="btn" id="step" type="button" title="한 단계씩 (→ 키)">한 단계 ▸</button>
+      <button class="btn" id="skip" type="button">다음 하중 ⏭</button>
+      <button class="btn" id="reset" type="button">↺ 처음</button>
+    </div>
+    <div class="seg" id="speed" role="group" aria-label="재생 속도"><span class="lab">속도</span></div>
+    <div class="seg" id="method" role="group" aria-label="헤시안 방식"><span class="lab">헤시안</span></div>
+  </div>
+</header>
+
+<div class="hud" aria-live="off">
+  <div class="kv"><span class="k">Phase</span><span class="v" id="h-ph">대기</span></div>
+  <div class="kv"><span class="k">Load step</span><span class="v" id="h-k">—</span></div>
+  <div class="kv"><span class="k">δ 압입</span><span class="v" id="h-d">—</span></div>
+  <div class="kv"><span class="k">Newton iter</span><span class="v" id="h-i">—</span></div>
+  <div class="kv"><span class="k">‖g‖ 불평형력</span><span class="v" id="h-r">—</span></div>
+  <div class="kv"><span class="k">α 보폭</span><span class="v" id="h-a">—</span></div>
+  <div class="kv"><span class="k">gap_min</span><span class="v" id="h-g">—</span></div>
+  <div class="kv"><span class="k">활성 접촉</span><span class="v" id="h-c">—</span></div>
+  <div class="kv"><span class="k">Fz 위 블록</span><span class="v" id="h-f">—</span></div>
+</div>
+
+<main class="layout">
+  <section class="stage" aria-label="실행 흐름도">
+    <div class="diagram-wrap"><svg id="map" viewBox="0 0 1110 1014" role="img" aria-label="함수 사이 데이터 흐름도"></svg></div>
+    <div class="timeline">
+      <span class="lab">TIMELINE</span>
+      <div class="track">
+        <input type="range" id="scrub" min="-1" max="0" value="-1" aria-label="재생 위치">
+        <div class="ticks" id="ticks"></div>
+      </div>
+      <span id="evc">0 / 0</span>
+    </div>
+    <div class="below">
+      <div class="console" id="log" aria-label="호출 기록"></div>
+      <div class="legend">
+        <div class="hd">LEGEND</div>
+        <div class="row"><svg width="22" height="14" aria-hidden="true"><circle cx="11" cy="7" r="4.5" class="pk-core req"/></svg>요청: 계산을 부탁하며 보내는 데이터</div>
+        <div class="row"><svg width="22" height="14" aria-hidden="true"><circle cx="11" cy="7" r="4.5" class="pk-core"/></svg>응답: 계산 결과가 돌아오는 데이터</div>
+        <div class="row"><svg width="22" height="14" aria-hidden="true"><line x1="1" y1="7" x2="21" y2="7" class="dim" stroke-dasharray="5 4"/></svg>반복 루프로 되돌아가는 길</div>
+        <div class="row"><span class="sw" style="background:var(--c-el)"></span><span class="sw" style="background:var(--c-hq)"></span><span class="sw" style="background:var(--c-ct)"></span><span class="sw" style="background:var(--c-wk)"></span>모서리 색 = 담당 열 (탄성 · 솔버 · 접촉 · 워커)</div>
+        <div class="row">흐린 노드는 고른 헤시안 방식에서 쓰지 않는 단계예요.</div>
+        <div class="row"><span class="mono" style="color:var(--faint)">Space</span> 재생/정지 · <span class="mono" style="color:var(--faint)">→</span> 한 단계</div>
+      </div>
+    </div>
+    <div class="charts">
+      <div class="card">
+        <div class="hd"><span class="t">두 블록 단면</span><span class="k">side view</span></div>
+        <svg id="sch" viewBox="0 0 320 180" role="img" aria-label="두 블록과 간격"></svg>
+        <p class="note">위 블록 윗면을 δ만큼 내리면 간격이 줄어요. 간격이 d̂ = 0.2 안으로 들어오면 장벽이 힘을 내요.</p>
+      </div>
+      <div class="card">
+        <div class="hd"><span class="t">Newton 수렴</span><span class="k">‖g‖ · log</span></div>
+        <svg id="res" viewBox="0 0 360 180" role="img" aria-label="반복별 불평형력 크기"></svg>
+        <p class="note">점 하나가 Newton 반복 한 번이에요. 초록 점선(10⁻⁸) 아래로 내려가면 그 하중 단계가 끝나요.</p>
+      </div>
+      <div class="card">
+        <div class="hd"><span class="t">최종 결과: 접촉력</span><span class="k">Fz – δ</span></div>
+        <svg id="fz" viewBox="0 0 320 180" role="img" aria-label="압입량별 접촉력"></svg>
+        <p class="note">각 하중 단계가 수렴할 때마다 위 블록이 받는 접촉력 한 점이 찍혀요.</p>
+      </div>
+    </div>
+  </section>
+
+  <aside class="inspector" aria-label="세부 정보">
+    <div class="panel">
+      <div class="ptitle"><span>NOW · 지금 일어나는 일</span><span id="now-kind"></span></div>
+      <div class="route" id="now-route"></div>
+      <p id="now-text"></p>
+    </div>
+    <div class="panel nodecard" id="card"></div>
+  </aside>
+</main>
+
+<script>
+const DATA = __DATA__;
+const tx = String.raw;
+const METHODS = Object.keys(DATA.methods);
+const CURV = {sr1_gap:['MultiGapSR1','gap 곡률 학습 (SR1)'],structured_bfgs_gap:['MultiGapStructuredBFGS','빠진 곡률 학습 (BFGS)']};
+const SPEEDS = [0.5,1,2,4];
+const M = DATA.meta, NQ = M.samples, NDOF = M.dofs, NSTEP = M.steps;
+
+/* ---------- geometry: lanes x bands ---------- */
+const H = 46;
+const C1 = {x:30,w:212}, C2 = {x:332,w:216}, C3 = {x:634,w:252}, C3a = {x:634,w:120}, C3b = {x:766,w:120}, C4 = {x:936,w:156};
+const NODE_DEFS = [
+  ['cli','hq',C1,18,'run.py','명령어 해석'],
+  ['run','hq',C2,18,'compression.run()','전체 지휘 · 드라이버'],
+  ['mesh','el',C1,150,'make_block() ×2','사면체 격자 생성'],
+  ['stiff','el',C1,210,'assemble_stiffness()','강성행렬 K 조립'],
+  ['build','hq',C2,180,'build_problem()','경계조건 · 문제 조립'],
+  ['sampler','ct',C3,150,'make_surface_sampler()','접촉면 적분점 만들기'],
+  ['autoc','ct',C3,210,'AutomaticRIMLSContact','접촉 패치 관리자'],
+  ['ipcinit','wk',C4,180,'IPCMeshCollision','충돌 워커 시작'],
+  ['closure','hq',C2,296,'set_closure(δ)','윗면을 δ만큼 내림'],
+  ['solve','hq',C2,352,'minimize_static()','Newton 반복 시작'],
+  ['prepare','hq',C2,440,'① prepare()','접촉 패치 갱신'],
+  ['objective','hq',C2,498,'② objective()','E · g · H 모으기'],
+  ['conv','hq',C2,556,'③ ‖g‖ < 1e-8 ?','수렴 판정'],
+  ['dir','hq',C2,614,'④ newton_direction()','(H+δI)p = −g 풀기'],
+  ['cap','hq',C2,672,'⑤ max_step','안전 보폭 상한 α₀'],
+  ['ls','hq',C2,730,'⑥ Armijo 선탐색','보폭 확정 · x 갱신'],
+  ['elastic','el',C1,498,'base()','탄성 ½uᵀKu'],
+  ['feas','el',C1,730,'energy(x+αp)','시험 위치 검사'],
+  ['refresh','ct',C3,440,'refresh()','마주보는 면 짝짓기'],
+  ['rimls','ct',C3,498,'rimls_values_torch()','RIMLS gap s 계산'],
+  ['barrier','ct',C3a,556,'barrier b(s)','장벽 에너지'],
+  ['jac','ct',C3b,556,'autograd J','J = ∂s/∂x'],
+  ['hess','ct',C3,614,'multiple_contact_terms()','접촉력 · 접촉강성'],
+  ['sr1','ct',C3,730,'MultiGapSR1','gap 곡률 학습 (SR1)'],
+  ['bvh','wk',C4,440,'ipctk BVH','근접 후보 탐색'],
+  ['ccd','wk',C4,672,'ipctk CCD','관통 없는 보폭 t'],
+  ['diag','hq',C2,808,'diagnostics()','접촉력 · 힘 평형'],
+  ['hist','hq',C2,864,'결과 행 기록','단계별 요약 출력'],
+  ['out','hq',C2,952,'make_animation()','3D 애니메이션 · CSV'],
+];
+const N = {};
+NODE_DEFS.forEach(([id,lane,c,y,name,role])=>{N[id]={id,lane,x:c.x,y,w:c.w,h:H,name,role}});
+const HESS_ROLE = {full:'Full: ∇²E_c 자동미분',gn:'GN: g_c, JᵀWJ',filtered_gn:'GN + b″ 필터',sr1_gap:'GN + SR1 보정',structured_bfgs_gap:'GN + 구조화 BFGS 보정'};
+const LANE_NAME = {el:'ELASTIC · 탄성체',hq:'SOLVER · 솔버 본부',ct:'CONTACT · 접촉 계산',wk:'WORKER · 별도 프로세스'};
+
+const Lp=(n,dy=0)=>[N[n].x, N[n].y+H/2+dy];
+const Rp=(n,dy=0)=>[N[n].x+N[n].w, N[n].y+H/2+dy];
+const Tp=(n,dx=0)=>[N[n].x+N[n].w/2+dx, N[n].y];
+const Bp=(n,dx=0)=>[N[n].x+N[n].w/2+dx, N[n].y+H];
+const via=(a,x,b)=>[a,[x,a[1]],[x,b[1]],b];
+const EDGE_DEFS = [
+  ['cli_run','cli','run',()=>[Rp('cli'),Lp('run')]],
+  ['run_build','run','build',()=>[Bp('run'),Tp('build')]],
+  ['build_mesh','build','mesh',()=>via(Lp('build',-8),272,Rp('mesh'))],
+  ['build_stiff','build','stiff',()=>via(Lp('build',8),272,Rp('stiff'))],
+  ['build_sampler','build','sampler',()=>via(Rp('build'),604,Lp('sampler'))],
+  ['run_ipc','run','ipcinit',()=>{const a=Rp('run',-8),b=Tp('ipcinit',46);return [a,[b[0],a[1]],b]}],
+  ['run_autoc','run','autoc',()=>via(Rp('run',8),912,Rp('autoc'))],
+  ['build_closure','build','closure',()=>[Bp('build'),Tp('closure')]],
+  ['closure_solve','closure','solve',()=>[Bp('closure'),Tp('solve')]],
+  ['solve_prepare','solve','prepare',()=>[Bp('solve'),Tp('prepare')]],
+  ['prepare_refresh','prepare','refresh',()=>[Rp('prepare'),Lp('refresh')]],
+  ['refresh_bvh','refresh','bvh',()=>[Rp('refresh'),Lp('bvh')]],
+  ['prepare_obj','prepare','objective',()=>[Bp('prepare'),Tp('objective')]],
+  ['obj_elastic','objective','elastic',()=>[Lp('objective'),Rp('elastic')]],
+  ['obj_rimls','objective','rimls',()=>[Rp('objective',-10),Lp('rimls',-10)]],
+  ['rimls_barrier','rimls','barrier',()=>[Bp('rimls',-66),Tp('barrier')]],
+  ['rimls_jac','rimls','jac',()=>[Bp('rimls',66),Tp('jac')]],
+  ['barrier_hess','barrier','hess',()=>[Bp('barrier'),Tp('hess',-66)]],
+  ['jac_hess','jac','hess',()=>[Bp('jac'),Tp('hess',66)]],
+  ['hess_obj','hess','objective',()=>via(Lp('hess'),610,Rp('objective',4))],
+  ['hess_sr1','hess','sr1',()=>[Bp('hess',66),Tp('sr1',66)]],
+  ['sr1_obj','sr1','objective',()=>via(Lp('sr1'),600,Rp('objective',16))],
+  ['obj_conv','objective','conv',()=>[Bp('objective'),Tp('conv')]],
+  ['conv_dir','conv','dir',()=>[Bp('conv'),Tp('dir')]],
+  ['dir_cap','dir','cap',()=>[Bp('dir'),Tp('cap')]],
+  ['cap_ccd','cap','ccd',()=>[Rp('cap'),Lp('ccd')]],
+  ['cap_ls','cap','ls',()=>[Bp('cap'),Tp('ls')]],
+  ['ls_feas','ls','feas',()=>[Lp('ls',-6),Rp('feas',-6)]],
+  ['ls_loop','ls','prepare',()=>via(Lp('ls',10),318,Lp('prepare')),'loop'],
+  ['conv_diag','conv','diag',()=>via(Rp('conv'),566,Rp('diag')),'exit'],
+  ['diag_hist','diag','hist',()=>[Bp('diag'),Tp('hist')]],
+  ['hist_loop','hist','closure',()=>via(Lp('hist'),300,Lp('closure')),'loop'],
+  ['hist_out','hist','out',()=>[Bp('hist'),Tp('out')]],
+];
+const EG = {};
+EDGE_DEFS.forEach(([id,from,to,pts,kind])=>{EG[id]={id,from,to,pts:pts(),kind:kind||''}});
+
+const BFGS_INFO = {file:'{{src/optimization/structured_bfgs.py#    def correction(}} · {{src/optimization/structured_bfgs.py#def structured_bfgs_update(}}',does:'활성 접촉 집합(접촉 자유도, gap 번호, 가중치)이 그대로인 동안 반복 사이의 이동 d와 빠진 곡률의 시컨트 z로 보정 행렬 A를 BFGS 방식으로 갱신해요. 이미 아는 곡률 G(= K + GN)는 그대로 두고 모자란 부분만 배워요. 활성 집합이 바뀌면 A를 0에서 다시 시작하고, 곡률 조건 dᵀu > 0이 안 맞으면 갱신을 건너뛰어요. 에너지와 힘은 GN과 같아요.',in:'J 행, gap, 가중치, 지금까지 조립한 H (K + GN)',out:'보정 행렬 A (접촉 자유도 블록)',tex:[[tx`\mathbf z=\sum_q w_q\,b'_q\big(\nabla s_q(\mathbf x_k)-\nabla s_q(\mathbf x_{k-1})\big),\qquad \mathbf u=G\mathbf d+\mathbf z`,'빠진 곡률의 시컨트와 전체 시컨트'],[tx`A_+=M-G-\frac{(M\mathbf d)(M\mathbf d)^{\mathsf T}}{\mathbf d^{\mathsf T}M\mathbf d}+\frac{\mathbf u\mathbf u^{\mathsf T}}{\mathbf d^{\mathsf T}\mathbf u},\qquad M=G+A`,'구조화 BFGS 갱신 (M은 양정치가 되게 이동)'],[tx`H=G+A,\qquad A\approx\sum_q w_q\,b'_q\,\nabla^2 s_q`,'헤시안 보정']],mech:'이미 아는 강성은 그대로 두고, 모자란 곡률만 반복 경험으로 채워 가는 준-Newton 보정.'};
+function offSet(m){
+  const off = new Set();
+  if(!CURV[m]){off.add('sr1');off.add('hess_sr1');off.add('sr1_obj')}
+  if(m==='full'){off.add('jac');off.add('rimls_jac');off.add('jac_hess')}
+  return off;
+}
+
+/* ---------- node knowledge ---------- */
+const INFO = {
+  cli:{file:'run.py · {{src/__main__.py#def main}}',does:'프로젝트 루트에서 python run.py two-body …를 실행하면 __main__.main()이 첫 단어를 보고 실행할 모듈을 골라요. two-body는 compression.py로 가고, hertz, crossed-cylinders, cylinder-validation은 각자의 검증 모듈로 가요. 나머지 옵션은 그대로 넘겨요.',in:'명령줄 인자',out:'compression.main() → run(…)',tex:[],mech:'시험기 전원을 켜고 시험 모드를 고르는 단계.'},
+  run:{file:'{{src/simulation/compression.py#def run(}}',does:'시뮬레이션 전체 순서를 지휘해요. 문제를 만들고, 충돌 워커와 접촉 관리자를 준비한 뒤, 압입량 δ를 N단계로 나눠 단계마다 solve()로 평형을 풀어요. 한 단계라도 수렴하지 않으면 그 자리에서 멈추고, 끝나면 결과 행을 모아 출력해요.',in:`steps = ${NSTEP}, closure = ${M.closure}, methods, collision, contact`,out:'problem, solutions, rows',tex:[[tx`\delta_k=\tfrac{k}{N}\,\delta_{\max},\qquad k=0,\dots,N`,`하중 단계. 이번 기록은 N = ${NSTEP}, δ_max = ${M.closure} (기본값은 N = 20)`]],mech:'변위 제어 압축 시험의 시험 절차서.'},
+  mesh:{file:'{{src/geometry/mesh.py#def make_block(}}',does:`1 × 1 × 0.4 직육면체를 ${M.mesh_counts.join(' × ')} 절점 격자로 나누고, 육면체 셀마다 사면체 6개로 쪼개요. 한 번만 나오는 삼각형을 모아 바깥 경계면을 찾고, 윗면 삼각형과 바닥 절점을 따로 표시해요.`,in:'width, depth, height, nx, ny, nz',out:`블록당 절점 ${M.nodes} · 사면체 ${M.tets} · 경계 삼각형 ${M.bfaces}`,tex:[[tx`b=i+n_x\,(j+n_y\,k)`,'셀 (i, j, k)의 시작 절점 번호. 여기에 사면체 6개의 꼭짓점 오프셋을 더해요.']],mech:'전처리기에서 메싱하는 단계.'},
+  stiff:{file:'{{src/mechanics/solid.py#def assemble_stiffness(}}',does:'사면체마다 형상함수 기울기로 변형률-변위 행렬 B를 만들고 등방성 재료행렬 D와 곱해 요소 강성 K_e를 구해요. 4096개씩 묶어 계산한 뒤 희소행렬(CSR)로 조립하고, 두 블록의 K는 대각 블록으로 붙여요.',in:'절점, 사면체, E = 30, ν = 0.3',out:`K ${M.total_dofs} × ${M.total_dofs} (비영 ${M.nnz}) → 자유도만 ${NDOF} × ${NDOF} (비영 ${M.nnz_free})`,tex:[[tx`\lambda=\frac{E\nu}{(1+\nu)(1-2\nu)},\qquad \mu=\frac{E}{2(1+\nu)}`,'라메 상수 → 재료행렬 D (6 × 6)'],[tx`K_e=V_e\,B_e^{\mathsf T}D\,B_e`,'요소 강성 (V_e: 사면체 부피)'],[tx`K=\sum_e P_e^{\mathsf T}K_e\,P_e`,'전역 조립. P_e는 요소 자유도 12개를 전역 번호로 옮겨요.']],mech:'F = Ku의 K. 요소별 스프링 상수를 한 장의 표로 모은 것.'},
+  build:{file:'{{src/simulation/two_body.py#def build_problem(}}',does:`아래 블록은 z = 0에, 위 블록은 0.4 + ${M.initial_gap} 높이에 놓아요. 아래 블록 바닥과 위 블록 윗면 절점은 고정하고, 남은 ${NDOF}개 좌표가 미지수예요. 숫자 대신 에너지·힘·강성·진단을 계산하는 함수 묶음(problem)을 돌려줘서, 뒤 단계들이 필요할 때마다 불러 써요.`,in:`n, initial_gap = ${M.initial_gap}, R = 1.5, d̂ = ${M.d_hat}`,out:'problem { objective, energy, contact, diagnostics, set_closure, … }',tex:[[tx`E(\mathbf x)=\tfrac12\,\mathbf u^{\mathsf T}K\mathbf u+\sum_q w_q\,b\big(s_q(\mathbf x)\big),\qquad \mathbf u=\mathbf x-\mathbf X`,'이 코드가 최소화하는 총 위치에너지: 탄성 + 접촉 장벽'],[tx`\mathbf x\in\mathbb R^{${NDOF}}\quad(${M.total_dofs}-${M.total_dofs-NDOF}\ \text{fixed})`,'미지수: 고정되지 않은 절점 좌표']],mech:'지그에 시편 두 개를 물리고 경계조건을 거는 단계.'},
+  sampler:{file:'{{src/geometry/surface.py#def make_surface_sampler(}}',does:'접촉할 면(아래 블록 윗면, 위 블록 아랫면)의 삼각형마다 적분점 3개를 두고 넓이의 1/3씩을 가중치로 줘요. 변형된 절점을 넣으면 적분점 위치와 단위 법선을 PyTorch로 계산하는 sample() 함수를 만들어 돌려줘요.',in:`기준 절점, 접촉면 삼각형 ${M.contact_tris.join(' + ')}`,out:'sample(nodes) → (적분점, 법선), 가중치 w_q',tex:[[tx`\mathbf x_q=\sum_{i=1}^{3}N_{qi}\,\mathbf x_i,\qquad w_q=\frac{A_f}{3}`,'적분점 위치와 가중치 (N = 2/3, 1/6, 1/6)'],[tx`\mathbf n_q=\frac{\sum_i N_{qi}\mathbf n_i}{\big\lVert\sum_i N_{qi}\mathbf n_i\big\rVert}`,'이웃 면 법선을 절점에 모아 보간한 단위 법선']],mech:'접촉면 위에 압력 센서를 촘촘히 깔아 두는 것.'},
+  autoc:{file:'{{src/geometry/contact_patches.py#class AutomaticRIMLSContact}}',does:`경계 삼각형을 법선이 30° 안으로 이어지는 매끈한 면 묶음으로 나눠요 (모두 ${M.groups}개). 면 묶음마다 표면 샘플러를 하나씩 만들어 두고, Newton 반복마다 어느 적분점이 어느 면 묶음을 상대로 gap을 잴지 정해요. 헤시안 방식마다 따로 만들어 서로 간섭하지 않아요.`,in:'경계 삼각형, 물체 번호, collider, d̂ = 0.2, skin = 0.1, R = 1.5',out:`면 묶음 ${M.groups}개, refresh() · gaps() · max_step()`,tex:[[tx`\mathbf n_a\cdot\mathbf n_b\ \ge\ \cos 30^{\circ}`,'이웃 삼각형을 같은 면 묶음으로 잇는 조건']],mech:'어느 면끼리 닿을 수 있는지 미리 분류해 두는 것.'},
+  ipcinit:{file:'{{src/collision/ipc_toolkit.py#class IPCMeshCollision}} · {{src/collision/_worker.py#def main}}',does:'PyTorch와 ipctk의 네이티브 라이브러리가 한 프로세스에서 부딪히지 않도록, 충돌 계산만 하는 Python 자식 프로세스를 띄워요. 메인 프로세스는 pickle로 init, candidate_indices, max_step 명령을 보내고 답을 받아요. 같은 물체끼리는 충돌 검사에서 빼요.',in:'경계 절점 · 모서리 · 삼각형, 물체 번호',out:`collider (BVH 광역 탐색, ipctk ${M.ipctk})`,tex:[],mech:'충돌 검사만 전담하는 외부 계측 장비를 따로 켜 두는 것.'},
+  closure:{file:'{{src/simulation/two_body.py#def set_closure(}} · {{src/simulation/compression.py#for step,amount in}}',does:'위 블록 윗면 절점의 목표 z좌표를 δ만큼 낮춰요. 기준 형상과 강성 K는 그대로 재사용해요. 두 번째 단계부터는 이전 해에서 새 경계 위치로 옮기는 동안 삼각형 관통이 없는지 CCD로 먼저 확인해요 ({{src/simulation/compression.py#if collider.max_step(previous_positions}}).',in:'δ_k',out:'갱신된 고정 좌표 (prescribed)',tex:[[tx`z_{\text{top}}=z^{0}_{\text{top}}-\delta_k`,'위 블록 윗면의 변위 경계조건']],mech:'UTM 크로스헤드를 한 칸 내리는 것.'},
+  solve:{file:'{{src/simulation/two_body.py#def solve(}} · {{src/optimization/newton.py#def minimize_static(}}',does:'선택한 헤시안 방식으로 minimize_static()을 불러요. sr1_gap이면 SR1 모델, structured_bfgs_gap이면 Structured BFGS 모델을 이 하중 단계 전용으로 새로 만들어요. 최대 150번, 허용오차 10⁻⁸. 에너지, 선탐색, CCD는 모든 방식이 같고 헤시안만 달라요.',in:'시작점 x₀ (이전 단계의 해)',out:'state, status, updates, residual, trace',tex:[[tx`\mathbf x^{\ast}=\arg\min_{\mathbf x}\,E(\mathbf x)`,'평형 형상 = 총 위치에너지의 최소점 (∇E = 0)']],mech:'한 하중 단계 안에서 평형을 찾는 반복 계산.'},
+  prepare:{file:'{{src/simulation/two_body.py#def prepare(}} · {{src/optimization/newton.py#prepared=prepared if iteration==0}}',does:'반복을 시작할 때마다 현재 절점 위치를 접촉 관리자에 넘겨 접촉 패치를 다시 골라요. 패치가 바뀌면 바뀌기 직전과 직후의 에너지 차이를 기록해요. 이 선택은 자동미분 밖에서 일어나고 선탐색 동안에는 고정돼요.',in:'현재 상태 x',out:'패치 정보 (후보 수, 질의 수, 변경 여부)',tex:[],mech:'이번 형상에서 접촉 센서마다 상대 면을 다시 짝지어 주는 것.'},
+  objective:{file:'{{src/simulation/two_body.py#def objective(}}',does:'탄성 항(base)과 접촉 항(contact)을 각각 요청해서 더해요. sr1_gap이나 structured_bfgs_gap이면 곡률 보정을 헤시안에만 더해요. 여기서 나오는 E, g, H가 Newton 법의 재료예요.',in:'상태 x',out:`E, g (${NDOF}), H (${NDOF} × ${NDOF} 희소), info`,tex:[[tx`E=E_{el}+E_c`,'총에너지'],[tx`\mathbf g=\nabla E=K\mathbf u+\mathbf g_c`,'불평형력. 0이면 평형'],[tx`H=\nabla^2E\approx K_{ff}+H_c`,'접선강성']],mech:'현재 형상의 잔류력과 접선강성을 계산하는 것.'},
+  conv:{file:'{{src/optimization/newton.py#if residual<tol}}',does:'기울기 g는 곧 각 자유도에 남은 불평형력이에요. 그 크기가 10⁻⁸보다 작으면 평형에 도달했다고 보고 반복을 끝내요. 아니면 Newton 증분 계산으로 넘어가요.',in:'g',out:'수렴 → diagnostics() · 미수렴 → newton_direction()',tex:[[tx`\lVert\mathbf g\rVert_2<10^{-8}`,'수렴 조건']],mech:'잔류력이 0에 충분히 가까우면 평형.'},
+  dir:{file:'{{src/optimization/newton.py#def sparse_newton_direction(}}',does:'H의 최소 고유값을 먼저 추정해요 (게르시고린 원, 부족하면 eigsh). 음수면 대각에 δ를 더해 양정치로 만든 뒤 희소 직접해법(spsolve)으로 증분 p를 풀어요. p가 에너지를 낮추는 방향이 아니면 −g로 바꿔요. 문제에 direction_solver가 지정돼 있으면(원통 검증의 정적 응축) 그 해법을 대신 쓰는데, 블록 압축에는 지정되어 있지 않아요.',in:'H, g',out:`증분 p (${NDOF}), 보정량 δ`,tex:[[tx`(H+\delta I)\,\mathbf p=-\mathbf g`,'Newton 증분'],[tx`\delta=\max\!\big(0,\ 10^{-7}-\lambda_{\min}(H)\big)`,'양정치 보정'],[tx`\mathbf g^{\mathsf T}\mathbf p\ge 0\ \Rightarrow\ \mathbf p=-\mathbf g`,'하강 방향이 아니면 최급강하로 대체']],mech:'Newton–Raphson 증분 계산 K_T Δu = R.'},
+  cap:{file:'{{src/simulation/compression.py#def safe_step(}} · {{src/geometry/contact_patches.py#def max_step(}}',does:'증분 p를 다 가도 되는지 두 가지로 제한해요. CCD는 경계 삼각형끼리 관통하기 직전까지의 비율 t를 주고, skin 제한은 가장 많이 움직이는 절점이 접촉 후보 탐색 범위를 벗어나지 않게 막아요. 둘 중 작은 값이 시작 보폭 α₀예요.',in:'x, x + p',out:'α₀ ∈ [0, 1]',tex:[[tx`\alpha_0=\min\!\Big(t_{\mathrm{CCD}},\ \min\!\big(1,\ \tfrac{\text{skin}}{4\,\max_i\lVert\Delta\mathbf x_i\rVert}\big)\Big)`,'skin = 0.1']],mech:'증분이 너무 크면 관통하거나 접촉 탐색 범위를 벗어나니 미리 줄여 두는 것.'},
+  ls:{file:'{{src/optimization/newton.py#for backtracks in range(}}',does:'x + αp의 에너지가 충분히 내려가는지 확인하고, 아니면 α를 반으로 줄여요 (최대 50번). 사면체가 뒤집히거나 gap이 0 이하가 되면 에너지가 ∞라서 자동으로 거절돼요. 통과하면 x를 갱신하고 ① prepare()로 돌아가요.',in:'x, p, α₀, E, g',out:'α, 새 상태 x',tex:[[tx`E(\mathbf x+\alpha\mathbf p)\le E(\mathbf x)+10^{-4}\,\alpha\,\mathbf g^{\mathsf T}\mathbf p`,'Armijo 충분 감소 조건'],[tx`\alpha\leftarrow\alpha/2,\qquad \mathbf x\leftarrow\mathbf x+\alpha\mathbf p`,'실패하면 반으로, 통과하면 갱신']],mech:'수렴이 안 될 때 하중 증분을 줄이는 cutback과 같은 발상.'},
+  elastic:{file:'{{src/simulation/two_body.py#def base(}}',does:'기준 위치 X에서 변위 u를 구하고, 미리 조립한 K로 에너지·내력·강성을 바로 계산해요. 소변형 선형 탄성이라 K는 반복마다 같아서 이 부분은 계산이 아주 가벼워요.',in:'x',out:'E_el, Ku, K_ff',tex:[[tx`\mathbf u=\mathbf x-\mathbf X,\qquad E_{el}=\tfrac12\mathbf u^{\mathsf T}K\mathbf u,\qquad \mathbf g_{el}=K\mathbf u`,'선형 탄성 항']],mech:'선형 스프링: 에너지 ½kx², 힘 kx.'},
+  feas:{file:'{{src/simulation/two_body.py#def energy(}} · {{src/mechanics/solid.py#def tetrahedron_volumes(}}',does:'선탐색이 제안한 위치의 총에너지를 계산해요. 모든 사면체 부피가 양수인지(뒤집힘 없음), 모든 gap이 양수인지 먼저 확인하고 하나라도 어기면 ∞를 돌려줘요. 미분은 계산하지 않고 RIMLS gap도 값만 구해요.',in:'시험 위치 x + αp',out:'E 또는 ∞',tex:[[tx`V_e=\tfrac16\det\big[\mathbf x_1-\mathbf x_0,\ \mathbf x_2-\mathbf x_0,\ \mathbf x_3-\mathbf x_0\big]>0`,'사면체 뒤집힘 검사'],[tx`s_q>0\quad\forall q`,'관통 없음']],mech:'요소가 뒤집히지 않았는지(음의 야코비안) 확인하는 것.'},
+  refresh:{file:'{{src/geometry/contact_patches.py#def refresh(}}',does:'워커가 준 근접 면 쌍 가운데 서로 마주보는 쌍만 남겨요. 그다음 적분점마다 상대 면 묶음의 삼각형까지 최단거리를 구해, 탐색 거리 안에서 가장 가까운 면 묶음을 gap 계산 대상으로 골라요. 선택이 이전과 같으면 저장해 둔 블록을 그대로 써요.',in:'절점 위치',out:'(적분점, 대상 면 묶음) 목록, 가중치 w, 접촉 자유도',tex:[[tx`\mathbf n_a\cdot\mathbf n_b\le-0.5`,'서로 마주보는 면 쌍'],[tx`\operatorname{dist}(\mathbf x_q,\,T)\le\hat d+\text{skin}=0.3`,'탐색 거리 안의 가장 가까운 면 묶음']],mech:'마주보는 면끼리만 접촉 쌍으로 인정하는 것.'},
+  rimls:{file:'{{src/geometry/rimls.py#def rimls_values_torch(}} (식: {{src/geometry/rimls.py#def _rimls_values_reference(}})',does:'상대 면의 점 p_j와 법선 n_j로 면까지의 매끈한 거리 s를 만들어요. 가까운 점일수록 큰 가중치를 주고, 1차 추정과 어긋나거나 법선이 다른 점은 지수 가중치로 깎아내요 (Robust IMLS). 모두 PyTorch 텐서로 계산해서 미분 경로가 남아요. 미분이 필요 없는 큰 계산(질의 수 × 표면점 수 ≥ 65,536)은 C++ 네이티브 커널로 값만 빠르게 구하고, 이번 블록 메시처럼 작으면 PyTorch 식을 그대로 써요.',in:'질의 적분점 q_i, 상대 면의 점 p_j · 법선 n_j',out:'gap s_i (적분점마다 하나)',tex:[[tx`a_{ij}=\Big(\max\big(0,\ 1-\lVert\mathbf q_i-\mathbf p_j\rVert^2/R^2\big)\Big)^{4}`,'유한 지지 거리 커널 (R = 1.5)'],[tx`\ell_{ij}=(\mathbf q_i-\mathbf p_j)\cdot\mathbf n_j,\qquad f_i=\frac{\sum_j a_{ij}\ell_{ij}}{\sum_j a_{ij}}`,'점 j의 접평면까지 거리, 1차 추정 (IMLS)'],[tx`w_{ij}=a_{ij}\exp\!\Big[-\frac{(f_i-\ell_{ij})^2}{(\sigma_rR)^2}-\frac{\lVert\nabla f_i-\mathbf n_j\rVert^2}{\sigma_n^2}\Big]`,'튀는 점을 깎는 강건 가중치 (σ_r = σ_n = 0.5)'],[tx`s_i=\frac{\sum_j w_{ij}\,\ell_{ij}}{\sum_j w_{ij}}`,'최종 gap']],mech:'주변 측정점들의 가중 평균으로 상대 면까지 거리를 매끈하게 보간하는 것.'},
+  barrier:{file:'{{src/contact/barrier.py#def barrier_arrays(}} · {{src/contact/terms.py#scalar_energy = torch.sum(}}',does:'gap이 d̂ = 0.2보다 작은 적분점만 활성이에요. s가 0에 가까워지면 b가 무한대로 커져서 두 물체는 절대 관통하지 못해요. 1·2차 미분 b′, b″도 함께 계산해 힘과 강성 조립에 넘겨요.',in:'gap s, d̂',out:'b, b′, b″, E_c',tex:[[tx`b(s)=\begin{cases}-(s-\hat d)^2\ln(s/\hat d) & 0<s<\hat d\\ 0 & s\ge\hat d\end{cases}`,'로그 장벽 (d̂ = 0.2)'],[tx`E_c=\sum_q w_q\,b(s_q)`,'접촉 에너지'],[tx`b'=-2r\ln\tfrac{s}{\hat d}-\tfrac{r^2}{s},\qquad b''=-2\ln\tfrac{s}{\hat d}-\tfrac{4r}{s}+\tfrac{r^2}{s^2},\qquad r=s-\hat d`,'힘과 강성에 쓰는 미분']],mech:'가까워질수록 한없이 단단해지는 비선형 스프링. 페널티 접촉의 매끈한 버전이에요.'},
+  jac:{file:'{{src/contact/terms.py#def _gap_jacobian_blocks(}} · {{src/geometry/rimls.py#class _SelectedRIMLS}}',does:'PyTorch가 gap 계산 과정을 거꾸로 따라가며(역전파) 각 gap이 각 자유도에 얼마나 민감한지 구해요. 메모리를 아끼려고 32개씩 묶어 계산하고, 질의가 적을 땐 손으로 유도한 역전파(_SelectedRIMLS.backward)로 반복 계산을 줄여요.',in:'gap 계산 그래프',out:'J (활성 gap × 접촉 자유도)',tex:[[tx`J_{qj}=\frac{\partial s_q}{\partial x_j}`,'gap 야코비안'],[tx`\bar{\mathbf q}_i=\bar s_i\sum_j A_{ij},\qquad \bar{\mathbf p}_j=-\sum_i\bar s_i A_{ij}`,'수동 역전파: 질의점과 표면점으로 기울기를 나눠 줘요']],mech:'변위가 조금 바뀌면 각 gap이 얼마나 바뀌는지 적어 둔 민감도 표.'},
+  sr1:{file:'{{src/optimization/sr1.py#def correction(}}',does:'gap마다(적분점–면 묶음 쌍) 지난 반복과의 기울기 변화를 기록해 ∇²s를 SR1 공식으로 추정해요. 최근 5쌍만 보관하고, 접촉이 풀리거나 대상이 바뀌거나 하중 단계가 바뀌면 기록을 지워요. 에너지와 힘은 그대로 두고 헤시안에만 보정 C를 더해요.',in:'J 행, gap, 가중치, 상태',out:'희소 보정 행렬 C',tex:[[tx`\mathbf d=\mathbf x_k-\mathbf x_{k-1},\qquad \mathbf y=\nabla s_q(\mathbf x_k)-\nabla s_q(\mathbf x_{k-1})`,'secant 쌍'],[tx`B\leftarrow B+\frac{(\mathbf y-B\mathbf d)(\mathbf y-B\mathbf d)^{\mathsf T}}{(\mathbf y-B\mathbf d)^{\mathsf T}\mathbf d}`,'SR1 갱신. 최근 5쌍으로 0에서 다시 쌓아요.'],[tx`C=\sum_q w_q\,b'_q\,B_q`,'헤시안 보정']],mech:'반복할 때마다 기울기 변화를 보고 곡률을 배워 가는 준-Newton 보정.'},
+  bvh:{file:'{{src/collision/_worker.py#ipctk.Candidates()}} · {{src/collision/ipc_toolkit.py#def face_pairs(}}',does:'경계 삼각형을 상자 계층(BVH)에 넣어 탐색 반경 안의 면-점(FV), 모서리-모서리(EE) 후보를 빠르게 찾아요. 같은 물체끼리는 빼요. 메인 프로세스가 후보를 이웃 면으로 펼쳐 서로 다른 물체의 면 쌍으로 만들어요.',in:'경계 절점 위치, 탐색 반경',out:'FV · EE 후보 → 면 쌍',tex:[[tx`r=\tfrac12(\hat d+\text{skin})=0.15`,'후보 탐색 반경 (양쪽에서 부풀려요)']],mech:'큰 상자부터 좁혀 가며 가까운 삼각형 쌍만 빠르게 추리는 것.'},
+  ccd:{file:'{{src/collision/_worker.py#compute_collision_free_stepsize}}',does:'모든 경계 절점이 x에서 x + p로 직선 이동할 때 삼각형끼리 처음 닿는 시각 t를 계산해요 (연속 충돌 검사). t = 1이면 끝까지 가도 안전해요. 실제 삼각형만 보호하고, RIMLS로 재구성한 면의 비교차까지 보장하지는 않아요.',in:'시작 위치, 끝 위치',out:'t_CCD ∈ [0, 1]',tex:[[tx`t_{\mathrm{CCD}}=\sup\{\,t\in[0,1]:\ \mathbf x+\tau\mathbf p\ \text{intersection-free},\ \forall\tau\le t\,\}`,'관통 없이 갈 수 있는 최대 비율']],mech:'이동 중 처음 닿는 순간을 계산하는 연속 충돌 검사.'},
+  diag:{file:'{{src/simulation/two_body.py#def diagnostics(}}',does:'수렴한 형상에서 접촉력(= −g_c)을 물체별로 합하고, 고정 절점의 반력과 위·아래 접촉력의 균형 오차를 계산해요. 위 블록이 받는 힘과 아래 블록이 받는 힘은 크기가 같고 방향이 반대여야 해요.',in:'평형 상태 x*',out:'접촉력, 반력, F_lower, F_upper, gap',tex:[[tx`\mathbf f_c=-\mathbf g_c,\qquad F_z=\sum_{i\in\text{body}}f_{c,iz}`,'물체별 접촉력 합'],[tx`\lVert\mathbf F_{\text{lower}}+\mathbf F_{\text{upper}}\rVert\approx 0`,'작용·반작용 검사']],mech:'로드셀 읽기: 위·아래 힘이 크기는 같고 방향이 반대인지 확인.'},
+  hist:{file:'{{src/simulation/compression.py#row=dict(}}',does:'단계·방식별로 반복 횟수, 잔차, 최소 gap, Fz, 경과 시간, 패치 변화를 한 행으로 기록하고 콘솔에 출력해요. 수렴하지 못한 단계가 있으면 바로 중단하고, 다음 단계는 이 해를 시작점으로 써요.',in:'solve 결과, diagnostics',out:'rows, history',tex:[],mech:'시험 데이터 한 줄을 기록하는 것.'},
+  out:{file:'{{src/simulation/compression.py#def make_animation(}} · {{src/simulation/compression.py#if outdir:}}',does:'--show면 matplotlib 3D 애니메이션(하중 슬라이더, 측면 접촉 확대)을 띄우고, --outdir면 summary.csv와 states.json을 저장해요. 둘 다 없으면 콘솔 출력만 남아요.',in:'history, rows',out:'그림 · CSV · JSON',tex:[],mech:'결과 그래프와 시험 보고서.'},
+};
+const filteredIts=()=>DATA.methods.filtered_gn.flatMap(st=>st.its).filter(it=>it.gap!=null);
+const filteredGap=()=>Math.min(...filteredIts().map(it=>it.gap));
+const filteredCut=()=>Math.max(0,...filteredIts().map(it=>it.fc));
+function hessInfo(m){
+  const base = {file:'{{src/contact/terms.py#def multiple_contact_terms(}} · {{src/contact/terms.py#def multiple_contact_terms_sparse(}}',in:'J, b′, b″, 가중치 w',out:'E_c, g_c, H_c',mech:'접촉 스프링의 접선강성을 전체 강성에 더하는 것.'};
+  const g = [tx`\mathbf g_c=J^{\mathsf T}(\mathbf w\odot\mathbf b')`,'접촉 내력 (접촉력 = −g_c)'];
+  const T = {
+    gn:['접촉 내력은 g_c = Jᵀ(w⊙b′), 접촉 강성은 Gauss–Newton 근사 JᵀWJ로 만들어요. gap 자체의 2차 미분(∇²s)은 버리기 때문에 항상 양반정치라 Newton 방향이 안정적이에요. 결과는 접촉 자유도에서 전체 희소행렬 위치로 옮겨요.',
+        [tx`H_c=J^{\mathsf T}\operatorname{diag}(\mathbf w\odot\mathbf b'')\,J`,'Gauss–Newton 접촉 강성']],
+    full:['E_c의 계산 그래프를 자동미분으로 두 번 미분해 정확한 헤시안을 만들어요. gap 곡률 항 Σ w b′ ∇²s까지 들어가서 수렴은 가장 빠르지만 계산이 무겁고 양정치가 아닐 수 있어요. 질의 수 × 표면점 수가 2,048 이상이면 RIMLS의 2차 미분을 C++ 네이티브 커널이 맡고, 이번 블록 메시처럼 작으면 PyTorch 자동미분으로 계산해요.',
+        [tx`H_c=J^{\mathsf T}\operatorname{diag}(\mathbf w\odot\mathbf b'')J+\sum_q w_q\,b'_q\,\nabla^2 s_q`,'정확한 헤시안 (자동미분 2회)']],
+    filtered_gn:[`GN과 같지만, gap이 0.1·d̂ = 0.02보다 작은 점은 b″를 b″(0.02)로 잘라 지나치게 큰 강성을 막아요. 이번 기록에서 최소 gap은 ${filteredGap().toFixed(3)}이고, 잘린 점은 ${filteredCut()?'반복당 최대 '+filteredCut()+'개예요':'없어요'}.`,
+        [tx`H_c=J^{\mathsf T}\operatorname{diag}(\mathbf w\odot\tilde{\mathbf b}'')J,\qquad \tilde b''_q=b''(0.1\hat d)\ \ (s_q<0.1\hat d)`,'곡률 필터']],
+    sr1_gap:['GN과 똑같이 g_c와 JᵀWJ를 만들고, J 행을 SR1 모듈에 넘겨 gap 곡률 보정을 받아요. 에너지와 힘은 GN과 같고 헤시안만 달라요.',
+        [tx`H=J^{\mathsf T}\operatorname{diag}(\mathbf w\odot\mathbf b'')J+\sum_q w_q\,b'_q\,B_q,\qquad B_q\approx\nabla^2 s_q`,'GN + SR1 곡률 보정']],
+    structured_bfgs_gap:['GN과 똑같이 g_c와 JᵀWJ를 만들고, J 행과 지금까지 조립한 헤시안(K + GN)을 Structured BFGS 모델에 넘겨 빠진 gap 곡률 보정을 받아요. 에너지와 힘은 GN과 같고 헤시안만 달라요.',
+        [tx`H=K_{ff}+J^{\mathsf T}\operatorname{diag}(\mathbf w\odot\mathbf b'')J+A,\qquad A\approx\sum_q w_q\,b'_q\,\nabla^2 s_q`,'GN + 구조화 BFGS 곡률 보정']],
+  }[m];
+  return Object.assign(base,{does:T[0],tex:[g,T[1]]});
+}
+const info = (id)=> id==='hess' ? hessInfo(method) : id==='sr1' && method==='structured_bfgs_gap' ? BFGS_INFO : INFO[id];
+
+/* ---------- formatting ---------- */
+const f3=x=>x==null?'—':x.toFixed(3);
+const f4=x=>x==null?'—':x.toFixed(4);
+const sci=x=>x==null?'—':(x===0?'0':x.toExponential(2));
+const short=id=>N[id].name.replace(/^[①-⑥]\s*/,'');
+
+/* ---------- event script built from the recorded run ---------- */
+function buildEvents(m){
+  const steps = DATA.methods[m], ev = [], ro = {}, seen = new Set();
+  let trail = [], rc = 0, fc = 0;
+  const s = {ph:'준비',k:null,delta:null,i:null,res:null,alpha:null,gap:null,act:null,Fz:null};
+  const resPts = [], fzPts = [];
+  steps.forEach((st,k)=>st.its.forEach((it,i)=>resPts.push({k,i,r:it.r})));
+  steps.forEach((st,k)=>fzPts.push({k,d:st.delta,f:st.Fzu}));
+  function push(e,d,p,t,mut){
+    if(mut) mut();
+    const g = EG[e], from = d>0?g.from:g.to, to = d>0?g.to:g.from, key = e+(d>0?'+':'-');
+    trail.push(e);
+    ev.push({e,d,from,to,p,t,first:!seen.has(key),s:{...s},ro:{...ro},trail:[...trail],rc,fc});
+    seen.add(key);
+  }
+  const SET = (o)=>()=>Object.assign(ro,o);
+  push('cli_run',1,'two-body --steps '+NSTEP,`<code>run.py</code>가 첫 단어 <b>two-body</b>를 보고 <code>compression.run()</code>을 실행해요. 하중 ${NSTEP}단계, 최종 압입 ${M.closure}, 헤시안 방식 <b>${m}</b>.${m==='structured_bfgs_gap'?' 이 방식은 아직 명령줄 --methods에 없어서 기록할 때는 <code>compression.run()</code>을 직접 불렀어요.':''}`,SET({cli:'two-body',run:NSTEP+' steps'}));
+  push('run_build',1,M.mesh_counts.join('×')+' · gap '+M.initial_gap,'<code>run()</code>이 <code>build_problem()</code>에 두 블록 접촉 문제를 만들어 달라고 요청해요.');
+  push('build_mesh',1,'격자 '+M.mesh_counts.join('×'),'<code>build_problem()</code>이 <code>make_block()</code>에 1 × 1 × 0.4 블록 격자를 두 번 요청해요.');
+  push('build_mesh',-1,`${M.nodes} 절점 · ${M.tets} 사면체`,`블록마다 절점 ${M.nodes}개, 사면체 ${M.tets}개, 경계 삼각형 ${M.bfaces}개가 돌아와요. 위 블록은 0.4 + ${M.initial_gap}만큼 올려서 배치해요.`,SET({mesh:`${M.nodes} · ${M.tets} ×2`}));
+  push('build_stiff',1,'E=30 · ν=0.3','절점, 사면체, 재료 상수를 넘기며 강성행렬을 요청해요.');
+  push('build_stiff',-1,`K ${M.total_dofs}×${M.total_dofs} · nnz ${M.nnz}`,`요소 ${2*M.tets}개의 K_e를 모은 희소 강성행렬 K가 돌아와요. 고정 자유도를 빼면 ${NDOF} × ${NDOF}예요. 선형 탄성이라 이 K는 끝까지 재사용해요.`,SET({stiff:'nnz '+M.nnz}));
+  push('build_sampler',1,'접촉면 삼각형 '+M.contact_tris.join('+'),'아래 블록 윗면과 위 블록 아랫면의 삼각형을 넘겨 접촉 적분점을 만들게 해요.');
+  push('build_sampler',-1,`적분점 ${NQ} · w=A/3`,`삼각형마다 3개씩 적분점 ${NQ}개와 면적 가중치, 그리고 변형 위치와 법선을 계산하는 <code>sample()</code> 함수가 돌아와요.`,SET({sampler:NQ+' pts'}));
+  push('run_build',-1,`problem · ${NDOF} DOF`,`아래 바닥과 위 윗면을 고정하고 남은 미지수 ${NDOF}개, 그리고 에너지·힘·강성·진단 함수 묶음 <code>problem</code>을 돌려줘요.`,SET({build:NDOF+' DOF'}));
+  push('run_ipc',1,'경계 삼각형 '+2*M.bfaces,`<code>run()</code>이 충돌 전용 Python 프로세스(<code>_worker.py</code>)를 띄우고 경계 삼각형 ${M.bfaces} + ${M.bfaces}개와 물체 번호를 pickle로 보내요.`);
+  push('run_ipc',-1,'collider 준비','워커가 <code>ipctk.CollisionMesh</code>를 만들어 두고 준비됐다고 답해요. PyTorch와 ipctk가 한 프로세스에서 부딪히지 않게 나눈 구조예요.',SET({ipcinit:'ipctk '+M.ipctk}));
+  push('run_autoc',1,`d̂ ${M.d_hat} · skin ${M.skin}`,`방식별 접촉 패치 관리자를 만들어요. 경계 삼각형을 법선이 30° 안으로 이어지는 면 묶음 ${M.groups}개로 나눠 둬요.`,SET({autoc:'면 묶음 '+M.groups}));
+
+  steps.forEach((st,k)=>{
+    trail = [];
+    const d3 = st.delta.toFixed(3);
+    const loadMut = ()=>{Object.assign(s,{ph:'하중 루프',k,delta:st.delta,i:null,res:null,alpha:null});ro.closure='δ '+d3;};
+    if(k===0) push('build_closure',1,'δ = '+d3,`<code>run()</code>이 하중 루프를 시작해요. <code>set_closure(δ)</code>로 위 블록 윗면을 δ = ${d3}만큼 내려요 (변위 제어).`,loadMut);
+    else push('hist_loop',1,'δ = '+d3,`다음 하중 단계 ${k}/${NSTEP}로 가요. 위 블록 윗면을 δ = ${d3}까지 내려요. 그 전에 이전 해에서 새 경계로 옮기는 동안 삼각형 관통이 없는지 CCD로 확인해요.`,loadMut);
+    push('closure_solve',1,k?'x₀ = 이전 해':'x₀ = 기준 형상',`<code>solve()</code>가 <b>${m}</b> 헤시안으로 <code>minimize_static()</code>의 Newton 반복을 시작해요. 시작점은 ${k?'이전 단계의 평형 해':'기준 형상'}이에요.`,SET({solve:m}));
+    push('solve_prepare',1,'x₀','반복에 들어가기 전에 접촉 패치부터 정해요.');
+    st.its.forEach((it,i)=>{
+      const last = i===st.its.length-1;
+      trail = [];
+      const Eel = it.E - it.Ec;
+      push('prepare_refresh',1,`절점 위치 ${2*M.nodes}×3`,`반복 ${i}: <code>prepare()</code>가 현재 절점 위치를 넘기며 접촉 패치를 다시 골라 달라고 요청해요.`,()=>{Object.assign(s,{ph:'Newton',i});});
+      push('refresh_bvh',1,'탐색 반경 '+(+((M.d_hat+M.skin)/2).toFixed(4)),'워커에 BVH로 탐색 반경 안의 삼각형 후보를 찾아 달라고 요청해요.');
+      push('refresh_bvh',-1,`후보 ${it.cand} → 면쌍 ${it.pairs}`,`면-점·모서리-모서리 후보 ${it.cand}개가 돌아오고, 서로 다른 물체의 면 쌍 ${it.pairs}개로 펼쳐져요.`,SET({bvh:`${it.cand}→${it.pairs}`}));
+      push('prepare_refresh',-1,`질의 ${it.q} · ${it.chg?'패치 생성':'변화 없음'}`,`마주보는 면 쌍만 남기고 적분점 ${it.q}개마다 gap을 잴 상대 면 묶음을 정했어요. ${it.chg?'처음 정한 패치예요.':'이전과 같은 패치라 저장해 둔 것을 그대로 써요.'}`,SET({refresh:`질의 ${it.q}`}));
+      push('prepare_obj',1,'x','<code>objective()</code>가 이번 형상의 에너지 E, 불평형력 g, 강성 H를 모으기 시작해요.');
+      push('obj_elastic',1,`x (${NDOF})`,'탄성 항을 요청해요.');
+      push('obj_elastic',-1,'E_el '+sci(Eel),`u = x − X로 탄성 에너지 E_el = ${sci(Eel)}, 내력 Ku, 강성 K_ff (${NDOF} × ${NDOF})를 돌려줘요. K는 미리 조립해 둔 것을 그대로 써요.`,SET({elastic:'E_el '+sci(Eel)}));
+      push('obj_rimls',1,'x → torch','접촉 gap 계산을 요청해요. 상태를 PyTorch 텐서로 넘겨서 미분 경로를 남겨요.');
+      const gp = it.gap==null?'—':it.gap.toFixed(4);
+      push('rimls_barrier',1,'s_min '+gp, it.act>0
+        ? `적분점 ${it.q}개의 RIMLS gap이 나왔어요. 최소 ${gp} &lt; d̂ = 0.2라서 ${it.act===it.q?'모두':it.act+'개가'} 장벽 구간에 들어왔어요.`
+        : it.gap==null ? '이번 형상에서는 gap을 잴 적분점이 없어요. 접촉력은 0이에요.'
+        : `적분점 ${it.q}개의 RIMLS gap이 나왔어요. 최소 ${gp} ≥ d̂ = 0.2라서 아직 장벽 밖이에요. 접촉력은 0이에요.`,
+        ()=>{Object.assign(s,{gap:it.gap,act:it.act,q:it.q});Object.assign(ro,{rimls:'s_min '+gp,barrier:`활성 ${it.act}/${it.q}`});});
+      if(it.act>0){
+        if(m!=='full'){
+          push('rimls_jac',1,'계산 그래프',`활성 gap ${it.act}개에 대해 PyTorch 역전파로 야코비안 J = ∂s/∂x를 구해요 (32개씩 묶어서).`,SET({jac:`${it.act}×${it.cd}`}));
+          push('jac_hess',1,`J ${it.act}×${it.cd}`,'J가 접촉력·강성 조립으로 넘어가요.');
+          push('barrier_hess',1,`b′ · b″ (${it.act})`,`장벽의 1·2차 미분 b′, b″가 넘어가요. 접촉 에너지 E_c = ${sci(it.Ec)}.${m==='filtered_gn'?` s &lt; 0.02인 점이 ${it.fc}개라 잘라낸 곡률은 없어요.`:''}`);
+          push('hess_obj',1,`g_c · H_c nnz ${it.nnz}`,`g_c = Jᵀ(w⊙b′)로 접촉 내력을, H_c = Jᵀdiag(w⊙b″)J로 접촉 강성(비영 ${it.nnz})을 만들어 돌려줘요.`,SET({hess:'nnz '+it.nnz}));
+          if(m==='sr1_gap'){
+            push('hess_sr1',1,`J 행 ${it.act}개`,'<code>objective()</code>가 접촉 결과의 gap별 기울기(J의 각 행)를 SR1 모듈에 넘겨 지난 반복과 비교하게 해요.');
+            push('sr1_obj',1,`C · 인자 ${it.sf}`, it.sf>0
+              ? `gap마다 쌓인 secant 쌍으로 곡률을 추정한 보정 인자 ${it.sf}개, ‖C‖ = ${sci(it.sn)}을 헤시안에 더해요. 에너지와 힘은 건드리지 않아요.`
+              : '이번 하중 단계에서 처음 활성인 반복이라 기울기만 기록하고 보정은 아직 0이에요.',SET({sr1:'인자 '+it.sf}));
+          } else if(m==='structured_bfgs_gap'){
+            push('hess_sr1',1,'J · H(K+GN)','<code>objective()</code>가 접촉 결과의 J와 지금까지 조립한 헤시안(K + GN)을 Structured BFGS 모델에 넘겨요.');
+            push('sr1_obj',1,'A · ‖A‖ '+sci(it.bn), it.br>0 ? '활성 접촉 집합이 바뀌어 보정을 0에서 다시 시작해요.'
+              : it.bu>0 ? `이동 d와 빠진 곡률 시컨트 z로 보정 A를 갱신했어요 (‖A‖ = ${sci(it.bn)}). 이 A를 헤시안에 더해요. 에너지와 힘은 건드리지 않아요.`
+              : it.bn>0 ? `곡률 조건이 맞지 않아 갱신을 건너뛰고 이전 보정 ‖A‖ = ${sci(it.bn)}을 그대로 더해요.`
+              : '이번 하중 단계에서 처음 활성인 반복이라 J만 기록하고 보정은 아직 0이에요.',SET({sr1:'‖A‖ '+sci(it.bn)}));
+          }
+        } else {
+          push('barrier_hess',1,'E_c 계산 그래프',`full 방식은 J를 따로 만들지 않고 E_c = ${sci(it.Ec)}의 계산 그래프를 자동미분으로 두 번 미분해요. gap 자체의 곡률까지 들어간 정확한 헤시안이에요.`);
+          push('hess_obj',1,`g_c · ∇²E_c nnz ${it.nnz}`,`gap 곡률 항 Σ w b′ ∇²s까지 들어간 정확한 접촉 헤시안(비영 ${it.nnz})을 돌려줘요.`,SET({hess:'nnz '+it.nnz}));
+        }
+      } else {
+        push('barrier_hess',1,'활성 0개','활성 접촉점이 없어서 장벽 에너지·힘·강성은 계산할 것이 없어요.');
+        push('hess_obj',1,'E_c = g_c = H_c = 0','접촉 기여는 0이에요. 이번 반복은 탄성 항만으로 풀어요.',SET({hess:'0'}));
+      }
+      push('obj_conv',1,'‖g‖ = '+sci(it.r),`E = ${sci(it.E)}, ‖g‖ = ${sci(it.r)}을 수렴 판정에 넘겨요.`,()=>{rc++;Object.assign(s,{res:it.r});Object.assign(ro,{conv:'‖g‖ '+sci(it.r),objective:'E '+sci(it.E)});});
+      if(last){
+        push('conv_diag',1,`수렴 · ${st.upd}회 갱신`,`‖g‖ = ${sci(it.r)} &lt; 10⁻⁸. 불평형력이 사라져 평형에 도달했어요 (${st.upd}번 갱신).`);
+      } else {
+        const a0 = Math.min(it.ccd,it.skin);
+        push('conv_dir',1,'‖g‖ ≥ 1e-8',`아직 불평형력 ‖g‖ = ${sci(it.r)}이 남아서 Newton 증분을 계산해요.`);
+        push('dir_cap',1,`p (${NDOF})`,it.reg===0?'H가 양정치라 보정 없이(δ = 0) H p = −g를 희소 직접해법으로 풀어 증분 p를 구했어요.':`H를 δ = ${sci(it.reg)}만큼 보정해 (H + δI)p = −g를 풀었어요.`,SET({dir:'δ = '+(it.reg===0?'0':sci(it.reg))}));
+        push('cap_ccd',1,'x → x+p','증분 p를 끝까지 갔을 때 경계 삼각형끼리 관통하지 않는지 워커에 연속 충돌 검사(CCD)를 요청해요.');
+        push('cap_ccd',-1,'t_CCD = '+it.ccd.toFixed(3),`관통 없이 끝까지 갈 수 있어요 (t = ${it.ccd.toFixed(3)}). 가장 많이 움직이는 절점이 ${sci(it.mv)}라 skin 제한은 min(1, ${M.skin} / (4 × ${sci(it.mv)})) = ${it.skin.toFixed(3)}, 그래서 α₀ = ${a0.toFixed(3)}이에요.`,SET({ccd:'t '+it.ccd.toFixed(3),cap:'α₀ '+a0.toFixed(3)}));
+        push('cap_ls',1,'α₀ = '+a0.toFixed(3),`시작 보폭 α₀ = ${a0.toFixed(3)}로 선탐색을 시작해요.`);
+        push('ls_feas',1,'E(x+αp)?','시험 위치의 총에너지를 계산해요. 사면체 부피 &gt; 0, gap &gt; 0을 먼저 확인하고 미분은 계산하지 않아요.');
+        push('ls_feas',-1,`Armijo 통과 · 되돌림 ${it.bt}`,it.bt===0?`에너지가 충분히 줄어서 첫 시도에 통과했어요 (α = ${it.a.toFixed(3)}).`:`${it.bt}번 반으로 줄여 α = ${it.a.toFixed(3)}에서 통과했어요.`,()=>{s.alpha=it.a;Object.assign(ro,{feas:'V>0 ✓',ls:'α '+it.a.toFixed(3)});});
+        push('ls_loop',1,`x ← x + ${it.a.toFixed(3)}·p`,`상태를 x ← x + ${it.a.toFixed(3)}·p로 갱신하고 반복 ${i+1}로 돌아가요.`);
+      }
+    });
+    const bal = Math.abs(st.Fzu+st.Fzl);
+    push('diag_hist',1,'Fz '+st.Fzu.toFixed(4),`위 블록이 받는 접촉력 Fz = ${st.Fzu.toFixed(4)}, 아래 블록은 ${st.Fzl.toFixed(4)}로 크기가 같고 방향이 반대예요 (합 ${sci(bal)}). 결과 한 줄을 기록해요.`,()=>{fc++;s.Fz=st.Fzu;Object.assign(ro,{diag:'Fz '+st.Fzu.toFixed(4),hist:`${k+1}/${steps.length} 행`});});
+  });
+  trail = [];
+  push('hist_out',1,`${steps.length}단계 결과`,`${steps.length}개 하중 단계가 모두 수렴했어요. <code>--show</code>면 3D 애니메이션, <code>--outdir</code>면 summary.csv와 states.json으로 내보내요.`,()=>{s.ph='완료';ro.out='완료';});
+  return {ev,resPts,fzPts};
+}
+
+/* ---------- svg helpers ---------- */
+const NS='http://www.w3.org/2000/svg';
+function el(tag,attrs,parent){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e}
+function pathD(pts,r=8){
+  let d=`M${pts[0][0]},${pts[0][1]}`;
+  for(let i=1;i<pts.length-1;i++){
+    const [x0,y0]=pts[i-1],[x1,y1]=pts[i],[x2,y2]=pts[i+1];
+    const d1=Math.hypot(x1-x0,y1-y0),d2=Math.hypot(x2-x1,y2-y1),rr=Math.min(r,d1/2,d2/2);
+    d+=` L${x1-(x1-x0)/d1*rr},${y1-(y1-y0)/d1*rr} Q${x1},${y1} ${x1+(x2-x1)/d2*rr},${y1+(y2-y1)/d2*rr}`;
+  }
+  const l=pts[pts.length-1];return d+` L${l[0]},${l[1]}`;
+}
+function arrow(pts){
+  const [x0,y0]=pts[pts.length-2],[x1,y1]=pts[pts.length-1];const L=Math.hypot(x1-x0,y1-y0)||1;
+  const ux=(x1-x0)/L,uy=(y1-y0)/L,bx=x1-ux*7,by=y1-uy*7;
+  return `${x1},${y1} ${bx-uy*3.6},${by+ux*3.6} ${bx+uy*3.6},${by-ux*3.6}`;
+}
+
+/* ---------- build the map ---------- */
+const svg=document.getElementById('map');
+const R = {nodes:{},edges:{}};
+let packet, chip, chipRect, chipText, pkCore;
+function buildMap(){
+  const defs=el('defs',{},svg);
+  const pat=el('pattern',{id:'dots',width:16,height:16,patternUnits:'userSpaceOnUse'},defs);el('circle',{cx:1,cy:1,r:.8,class:'dots'},pat);
+  const f=el('filter',{id:'glow',x:'-30%',y:'-60%',width:'160%',height:'220%'},defs);
+  el('feFlood',{class:'glow-flood',result:'c'},f);el('feComposite',{in:'c',in2:'SourceAlpha',operator:'in',result:'s'},f);
+  el('feGaussianBlur',{in:'s',stdDeviation:5,result:'b'},f);const mg=el('feMerge',{},f);el('feMergeNode',{in:'b'},mg);el('feMergeNode',{in:'SourceGraphic'},mg);
+  const fh=el('filter',{id:'soft',x:'-100%',y:'-100%',width:'300%',height:'300%'},defs);el('feGaussianBlur',{stdDeviation:3},fh);
+  el('rect',{x:0,y:0,width:1110,height:1014,fill:'url(#dots)'},svg);
+  // lanes
+  [[16,240,'el','ELASTIC','탄성체 FEM'],[288,300,'hq','SOLVER','솔버 본부'],[620,280,'ct','CONTACT','접촉 계산'],[924,180,'wk','WORKER','별도 프로세스']].forEach(([x,w,c,a,b])=>{
+    el('rect',{x,y:84,width:w,height:920,rx:4,class:c==='wk'?'lane-wk':'lane-bg'},svg);
+    el('line',{x1:x+1,x2:x+w-1,y1:85,y2:85,class:'lane-top',stroke:`var(--c-${c})`},svg);
+    el('text',{x:x+14,y:106,class:'lane-h1'},svg).textContent=a;
+    el('text',{x:x+14,y:123,class:'lane-h2'},svg).textContent=b;
+  });
+  // bands
+  [[134,'SETUP · 준비 (1회)',13],[268,'LOAD LOOP · 하중 단계 반복',13],[936,'OUTPUT · 결과',-5]].forEach(([y,t,dy])=>{
+    el('line',{x1:16,x2:1104,y1:y,y2:y,class:'band'},svg);
+    el('text',{x:1096,y:y+dy,'text-anchor':'end',class:'band-t'},svg).textContent=t;
+  });
+  // frames
+  el('rect',{x:292,y:280,width:292,height:644,rx:6,class:'frame'},svg);
+  el('rect',{x:310,y:412,width:270,height:378,rx:6,class:'frame newton'},svg);
+  [[302,280,'LOAD ×'+(NSTEP+1),''],[320,412,'NEWTON ↻','newton']].forEach(([x,y,t,c])=>{
+    const g=el('g',{},svg);const tt=el('text',{x:x+5,y:y+3.5,class:'ftab '+c},g);tt.textContent=t;
+    el('rect',{x,y:y-6,width:t.length*7.4+10,height:12,class:'ftab-bg'},g);g.appendChild(tt);
+  });
+  el('text',{x:0,y:0,class:'vlab',transform:'translate(328,700) rotate(-90)'},svg).textContent='다음 반복';
+  el('text',{x:0,y:0,class:'vlab',transform:'translate(312,880) rotate(-90)'},svg).textContent='다음 하중';
+  el('text',{x:571,y:600,class:'vlab',transform:'rotate(90 571 600)'},svg).textContent='수렴 → 탈출';
+  // edges
+  const eg=el('g',{},svg);
+  for(const id in EG){
+    const e=EG[id];const g=el('g',{class:'edge '+e.kind,'data-id':id},eg);
+    const p=el('path',{d:pathD(e.pts)},g);el('polygon',{points:arrow(e.pts)},g);
+    R.edges[id]={g,p,len:0};
+  }
+  // nodes
+  const ng=el('g',{},svg);
+  for(const id in N){
+    const n=N[id];const g=el('g',{class:'node '+n.lane,'data-id':id,tabindex:0,role:'button','aria-label':n.name+' — '+n.role},ng);
+    el('rect',{x:n.x,y:n.y,width:n.w,height:n.h,rx:3,class:'box'},g);
+    el('path',{d:`M${n.x},${n.y+9} V${n.y} H${n.x+9} M${n.x+n.w},${n.y+n.h-9} V${n.y+n.h} H${n.x+n.w-9}`,class:'crn'},g);
+    if(id==='conv') el('path',{d:`M${n.x+n.w-18},${n.y+H/2-6} l6,6 l-6,6 l-6,-6z`,class:'crn'},g);
+    const nm=el('text',{x:n.x+12,y:n.y+19,class:'nm'},g);nm.textContent=n.name;
+    const rl=el('text',{x:n.x+12,y:n.y+36,class:'rl'},g);rl.textContent=n.role;
+    const b=el('g',{class:'badge'},g);const br=el('rect',{x:0,y:n.y-8,width:0,height:16,rx:2},b);const bt=el('text',{x:n.x+n.w-8,y:n.y+3.5,'text-anchor':'end'},b);
+    b.style.display='none';
+    R.nodes[id]={g,nm,rl,b,br,bt,val:null};
+    g.addEventListener('click',()=>pin(id));
+    g.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();pin(id)}});
+    g.addEventListener('mouseenter',()=>near(id,true));
+    g.addEventListener('mouseleave',()=>near(id,false));
+  }
+  // title block
+  const tb=el('g',{class:'tb'},svg);
+  el('rect',{x:634,y:950,width:458,height:48},tb);
+  el('line',{x1:634,x2:1092,y1:974,y2:974},tb);el('line',{x1:930,x2:930,y1:950,y2:998},tb);
+  el('text',{x:642,y:966,class:'a'},tb).textContent='FEM · RIMLS CONTACT  실행 흐름도';
+  el('text',{x:642,y:990,class:'b'},tb).textContent=`DATA  two-body --steps ${NSTEP} · ${M.recorded}`;
+  el('text',{x:938,y:962,class:'c'},tb).textContent='REV';
+  el('text',{x:972,y:966,class:'a'},tb).textContent=M.rev+(M.dirty?'*':'');
+  el('text',{x:938,y:986,class:'c'},tb).textContent='SHEET';
+  el('text',{x:986,y:990,class:'b'},tb).textContent='29 NODES · 33 LINKS';
+  // packet + chip
+  packet=el('g',{style:'display:none'},svg);
+  el('circle',{r:11,class:'pk-halo',filter:'url(#soft)'},packet);
+  pkCore=el('circle',{r:5,class:'pk-core'},packet);
+  chip=el('g',{class:'chip',style:'display:none'},svg);chipRect=el('rect',{rx:3,height:18},chip);chipText=el('text',{},chip);
+  for(const id in R.edges)R.edges[id].len=R.edges[id].p.getTotalLength();
+}
+function setBadge(id,val){
+  const r=R.nodes[id];if(r.val===val)return;r.val=val;
+  if(val==null){r.b.style.display='none';return}
+  r.b.style.display='';r.bt.textContent=val;
+  const w=Math.max(24,r.bt.getComputedTextLength()+12),n=N[id];
+  r.br.setAttribute('x',n.x+n.w-w-2);r.br.setAttribute('width',w);
+}
+function near(id,on){
+  for(const e in EG){if(EG[e].from===id||EG[e].to===id)R.edges[e].g.classList.toggle('near',on)}
+}
+
+/* ---------- playback state ---------- */
+let method='gn', evs=[], resPts=[], fzPts=[], idx=-1, playing=false, speed=1, token=0, pinned=null, cardId=null;
+const reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $=id=>document.getElementById(id);
+
+function load(m){
+  method=m;({ev:evs,resPts,fzPts}=buildEvents(m));
+  const off=offSet(m);
+  for(const id in R.nodes)R.nodes[id].g.classList.toggle('off',off.has(id));
+  for(const id in R.edges)R.edges[id].g.classList.toggle('off',off.has(id));
+  R.nodes.hess.rl.textContent=HESS_ROLE[m];
+  const cv=CURV[m]||['MultiGapSR1 · BFGS','곡률 보정 (두 방식 전용)'];N.sr1.name=cv[0];N.sr1.role=cv[1];R.nodes.sr1.nm.textContent=cv[0];R.nodes.sr1.rl.textContent=cv[1];
+  $('scrub').max=evs.length-1;
+  const ticks=$('ticks');ticks.innerHTML='';
+  let lastPct=-100;
+  const mk=(j,t)=>{const pct=(j+1)/evs.length*100,s=document.createElement('span');s.style.left=pct+'%';s.textContent=t;s.dataset.j=j;
+    if(pct-lastPct<7)s.classList.add('quiet');else lastPct=pct;ticks.appendChild(s)};
+  mk(-1,'SETUP');
+  evs.forEach((e,j)=>{if(e.e==='build_closure'||e.e==='hist_loop')mk(j,'δ'+e.s.delta.toFixed(3).slice(1))});
+  stop();idx=-1;pinned=null;apply(-1);
+}
+
+function apply(i){
+  idx=i;const e=evs[i];
+  $('scrub').value=i;$('evc').textContent=`${i+1} / ${evs.length}`;
+  document.querySelectorAll('#ticks span').forEach(t=>t.classList.toggle('on',+t.dataset.j<=i));
+  const s=e?e.s:{ph:'대기'};
+  const hud={'h-ph':s.ph,'h-k':s.k==null?'—':`${s.k} / ${NSTEP}`,'h-d':f3(s.delta),'h-i':s.i==null?'—':s.i,'h-r':sci(s.res),'h-a':f3(s.alpha),'h-g':f4(s.gap),'h-c':s.act==null?'—':`${s.act} / ${s.q}`,'h-f':f4(s.Fz)};
+  for(const k in hud){const v=$(k);const nv=String(hud[k]);if(v.textContent!==nv){v.textContent=nv;v.classList.add('flash');setTimeout(()=>v.classList.remove('flash'),350)}}
+  const ro=e?e.ro:{};for(const id in N)setBadge(id,ro[id]);
+  const trail=new Set(e?e.trail:[]),seen=new Set();
+  for(const id in R.edges){const on=trail.has(id);R.edges[id].g.classList.toggle('trail',on);R.edges[id].g.classList.remove('hot');if(on){seen.add(EG[id].from);seen.add(EG[id].to)}}
+  if(e)R.edges[e.e].g.classList.add('hot');
+  for(const id in R.nodes){R.nodes[id].g.classList.toggle('seen',seen.has(id));R.nodes[id].g.classList.toggle('active',!!e&&e.to===id);R.nodes[id].g.classList.toggle('pinned',pinned===id)}
+  renderNow(e);renderCard(pinned||(e?e.to:'build'));renderLog(i);
+  drawRes(e?e.rc:0,e&&e.s.res!=null?e.rc-1:-1);drawFz(e?e.fc:0);drawSch(e?e.s:{});
+  $('play').textContent=playing?'❚❚ 일시정지':(i>=evs.length-1&&i>=0?'↺ 다시 실행':'▶ 실행');
+}
+
+function renderNow(e){
+  const route=$('now-route'),txt=$('now-text');
+  if(!e){$('now-kind').textContent='';route.innerHTML='';
+    txt.innerHTML='<b>▶ 실행</b>을 누르면 실제 기록 순서대로 데이터 점이 함수 사이를 오가요. 처음 지나는 길은 천천히, 반복되는 길은 빠르게 지나가요. 지금 오른쪽 아래에는 이 코드가 푸는 핵심 식이 있는 <code>build_problem()</code>이 열려 있어요.';return}
+  const g=EG[e.e];const kind=g.kind==='loop'?'반복':e.d<0?'응답':['build_mesh','build_stiff','build_sampler','run_build','run_ipc','prepare_refresh','refresh_bvh','obj_elastic','cap_ccd','ls_feas'].includes(e.e)?'요청':'전달';
+  $('now-kind').textContent=kind;
+  route.innerHTML=`<span class="pill">${short(e.from)}</span><span class="arrow">→</span><span class="pill">${short(e.to)}</span><span class="pill pay">${e.p}</span>`;
+  txt.innerHTML=e.t;
+}
+
+const texCache=new Map();
+function texNode(src){
+  if(window.MathJax&&MathJax.tex2svg){
+    if(!texCache.has(src)){try{texCache.set(src,MathJax.tex2svg(src,{display:true}))}catch(err){texCache.set(src,null)}}
+    const n=texCache.get(src);if(n)return n.cloneNode(true);
+  }
+  const c=document.createElement('code');c.className='tex-fallback';c.textContent=src;return c;
+}
+function renderCard(id,force){
+  if(id===cardId&&!force){$('card').querySelector('.live').textContent=liveLine(id);return}
+  cardId=id;const n=N[id],I=info(id),off=offSet(method).has(id);
+  const card=$('card');
+  card.innerHTML=`<div class="ptitle"><span class="lane-tag"><span class="sw" style="background:var(--c-${n.lane})"></span>${LANE_NAME[n.lane]}</span>${pinned===id?'<button class="unpin" type="button" id="unpin">고정 해제</button>':'<span>NODE</span>'}</div>
+  <h2>${n.name}</h2><p class="role">${id==='hess'?HESS_ROLE[method]:n.role}</p><p class="file">${I.file}</p>
+  ${off?`<p class="off-note">${method} 방식에서는 이 단계를 거치지 않아요.</p>`:''}
+  <p class="does"></p>
+  <dl class="io"><dt>INPUT</dt><dd></dd><dt>OUTPUT</dt><dd></dd></dl>
+  <div class="eqs"></div>
+  <p class="live"></p>
+  <div class="mech"><b>기계공학으로 보면</b></div>`;
+  card.querySelector('.does').textContent=I.does;
+  const dds=card.querySelectorAll('.io dd');dds[0].textContent=I.in;dds[1].textContent=I.out;
+  const eqs=card.querySelector('.eqs');
+  I.tex.forEach(([t,c])=>{const d=document.createElement('div');d.className='eq';const tt=document.createElement('div');tt.className='tex';tt.appendChild(texNode(t));const cc=document.createElement('div');cc.className='cap';cc.textContent=c;d.append(tt,cc);eqs.appendChild(d)});
+  if(!I.tex.length)eqs.remove();
+  card.querySelector('.mech').append(I.mech);
+  card.querySelector('.live').textContent=liveLine(id);
+  const u=$('unpin');if(u)u.addEventListener('click',()=>{pinned=null;apply(idx)});
+}
+function liveLine(id){const e=evs[idx];const v=e&&e.ro[id];return v?'현재 값 · '+v:''}
+
+function renderLog(i){
+  const box=$('log');const from=Math.max(0,i-7);let h='<div class="hd">CALL LOG · 최근 호출</div>';
+  if(i<0)h+='<div class="ln">실행하면 함수 호출이 여기에 한 줄씩 쌓여요.</div>';
+  for(let j=from;j<=i;j++){const e=evs[j];const tag=e.s.k==null?'setup':`k${e.s.k}${e.s.i==null?'':'·i'+e.s.i}`;
+    h+=`<div class="ln${j===i?' cur':''}">[${tag.padEnd(6,' ')}] <b>${short(e.from)}</b> ${e.d<0?'⇠':'→'} <b>${short(e.to)}</b> : ${e.p}</div>`}
+  box.innerHTML=h;
+}
+
+/* ---------- charts ---------- */
+function clear(svgEl){while(svgEl.firstChild)svgEl.removeChild(svgEl.firstChild)}
+function drawRes(rc,cur){
+  const S=$('res');clear(S);const W=360,Hh=180,l=40,r=10,t=14,b=26;
+  const n=resPts.length,X=j=>l+(n>1?j/(n-1):0)*(W-l-r),Y=v=>t+(1-(v+16)/17)*(Hh-t-b);
+  [0,-4,-8,-12,-16].forEach(v=>{el('line',{x1:l,x2:W-r,y1:Y(v),y2:Y(v),class:v===-8?'tol':'gl'},S);el('text',{x:l-5,y:Y(v)+3,'text-anchor':'end',class:'tk'},S).textContent=v===0?'1':'1e'+v});
+  el('text',{x:W-r,y:Y(-8)-4,'text-anchor':'end',class:'tol-t'},S).textContent='tol 1e-8';
+  el('line',{x1:l,x2:l,y1:t,y2:Hh-b,class:'ax'},S);
+  let prevK=-1,lastX=-99;
+  resPts.forEach((p,j)=>{if(p.k!==prevK){if(j>0)el('line',{x1:X(j-.5),x2:X(j-.5),y1:t,y2:Hh-b,class:'sep'},S);
+    if(X(j)-lastX>34){el('text',{x:X(j)+(j===0?0:2),y:Hh-b+14,class:'tk'},S).textContent='δ'+fzPts[p.k].d.toFixed(3).slice(1);lastX=X(j)}prevK=p.k}});
+  const lv=v=>v<=0?-16:Math.max(-16,Math.log10(v));
+  const segs={};resPts.forEach((p,j)=>{(segs[p.k]=segs[p.k]||[]).push([j,p])});
+  Object.values(segs).forEach(seg=>{
+    const all=seg.map(([j,p])=>`${X(j)},${Y(lv(p.r))}`).join(' ');el('polyline',{points:all,class:'ghost'},S);
+    const shown=seg.filter(([j])=>j<rc);if(shown.length>1)el('polyline',{points:shown.map(([j,p])=>`${X(j)},${Y(lv(p.r))}`).join(' '),class:'ser'},S);
+  });
+  resPts.forEach((p,j)=>{const on=j<rc;el('circle',{cx:X(j),cy:Y(lv(p.r)),r:j===cur?4.5:3,class:'pt'+(on?'':' g')+(on&&p.r===0?' zero':'')+(j===cur?' cur':'')},S)});
+  if(cur>=0){const p=resPts[cur];el('text',{x:Math.min(X(cur)+7,W-60),y:Math.max(Y(lv(p.r))-7,t+8),class:'vt'},S).textContent=sci(p.r)}
+}
+function drawFz(fc){
+  const S=$('fz');clear(S);const W=320,Hh=180,l=42,r=12,t=14,b=26;
+  const dMax=fzPts[fzPts.length-1].d||1,fMax=Math.max(...fzPts.map(p=>p.f))||1;
+  const raw=fMax/3,pw=Math.pow(10,Math.floor(Math.log10(raw))),m=raw/pw,step=(m<1.5?1:m<3?2:m<7?5:10)*pw;
+  const yTop=Math.ceil(fMax*1.05/step)*step,dec=Math.max(0,-Math.floor(Math.log10(step)));
+  const X=d=>l+d/dMax*(W-l-r),Y=v=>t+(1-v/yTop)*(Hh-t-b);
+  for(let v=0;v<=yTop+step/2;v+=step){el('line',{x1:l,x2:W-r,y1:Y(v),y2:Y(v),class:'gl'},S);el('text',{x:l-5,y:Y(v)+3,'text-anchor':'end',class:'tk'},S).textContent=v.toFixed(dec)}
+  let lastX=-99;fzPts.forEach(p=>{if(X(p.d)-lastX>=40){el('text',{x:X(p.d),y:Hh-b+14,'text-anchor':'middle',class:'tk'},S).textContent=p.d.toFixed(3);lastX=X(p.d)}});
+  el('line',{x1:l,x2:l,y1:t,y2:Hh-b,class:'ax'},S);el('line',{x1:l,x2:W-r,y1:Hh-b,y2:Hh-b,class:'ax'},S);
+  el('polyline',{points:fzPts.map(p=>`${X(p.d)},${Y(p.f)}`).join(' '),class:'ghost'},S);
+  const sh=fzPts.slice(0,fc);if(sh.length>1)el('polyline',{points:sh.map(p=>`${X(p.d)},${Y(p.f)}`).join(' '),class:'ser'},S);
+  fzPts.forEach((p,j)=>el('circle',{cx:X(p.d),cy:Y(p.f),r:j===fc-1?4.5:3,class:'pt'+(j<fc?'':' g')+(j===fc-1?' cur':'')},S));
+  if(fc>0){const p=fzPts[fc-1];el('text',{x:Math.min(X(p.d)-6,W-r),y:Y(p.f)-9,'text-anchor':'end',class:'vt'},S).textContent='Fz '+p.f.toFixed(4)}
+  el('text',{x:l+6,y:t+4,class:'tk'},S).textContent='Fz';
+}
+function hatch(S,x1,x2,y,dir){for(let x=x1;x<x2;x+=7)el('line',{x1:x,y1:y,x2:x+5*dir,y2:y+5*(dir>0?1:-1)*(dir>0?1:1),class:'hatch'},S)}
+function drawSch(s){
+  const g0=M.initial_gap,dh=M.d_hat,top=.8+g0;
+  const S=$('sch');clear(S);const sc=124/top,base=162,x0=96,w=118;
+  const z=v=>base-v*sc;
+  const delta=s.delta||0,gap=s.gap!=null?s.gap:g0;
+  const loTop=.4,upBot=.4+gap,upTop=top-delta;
+  el('line',{x1:x0-14,x2:x0+w+14,y1:base,y2:base,class:'ax'},S);
+  for(let x=x0-12;x<x0+w+12;x+=7)el('line',{x1:x,y1:base,x2:x-5,y2:base+6,class:'hatch'},S);
+  el('rect',{x:x0,y:z(.4+dh),width:w,height:z(.4)-z(.4+dh),class:'zone'+(gap<dh?' hit':'')},S);
+  el('rect',{x:x0,y:z(loTop),width:w,height:z(0)-z(loTop),class:'blk lo'},S);
+  el('rect',{x:x0,y:z(upTop),width:w,height:z(upBot)-z(upTop),class:'blk up'},S);
+  const ch=z(upTop);el('line',{x1:x0-14,x2:x0+w+14,y1:ch,y2:ch,class:'ax'},S);
+  for(let x=x0-12;x<x0+w+12;x+=7)el('line',{x1:x,y1:ch,x2:x-5,y2:ch-6,class:'hatch'},S);
+  el('text',{x:x0+w/2,y:z(.2)+4,'text-anchor':'middle',class:'dim-t m'},S).textContent='아래 블록';
+  el('text',{x:x0+w/2,y:(z(upBot)+z(upTop))/2+4,'text-anchor':'middle',class:'dim-t m'},S).textContent='위 블록';
+  // gap dimension
+  const dx=x0+w+22;el('line',{x1:x0+w+3,x2:dx+4,y1:z(loTop),y2:z(loTop),class:'dim'},S);el('line',{x1:x0+w+3,x2:dx+4,y1:z(upBot),y2:z(upBot),class:'dim'},S);
+  el('line',{x1:dx,x2:dx,y1:z(loTop),y2:z(upBot),class:'dim'},S);
+  el('polygon',{points:`${dx},${z(loTop)} ${dx-3},${z(loTop)-6} ${dx+3},${z(loTop)-6}`,class:'push-h'},S);
+  el('polygon',{points:`${dx},${z(upBot)} ${dx-3},${z(upBot)+6} ${dx+3},${z(upBot)+6}`,class:'push-h'},S);
+  el('text',{x:dx+7,y:(z(loTop)+z(upBot))/2-2,class:'dim-t'},S).textContent='gap';
+  el('text',{x:dx+7,y:(z(loTop)+z(upBot))/2+10,class:'vt'},S).textContent=gap.toFixed(4);
+  // d_hat dimension
+  const hx=x0-22;el('line',{x1:hx,x2:hx,y1:z(.4),y2:z(.4+dh),class:'dim'},S);
+  el('line',{x1:hx-4,x2:x0-3,y1:z(.4+dh),y2:z(.4+dh),class:'dim','stroke-dasharray':'2 2'},S);
+  el('text',{x:hx-5,y:(z(.4)+z(.4+dh))/2+3,'text-anchor':'end',class:'dim-t m'},S).textContent='d̂ '+dh;
+  // push arrow
+  const ax=x0+w/2;el('line',{x1:ax,x2:ax,y1:ch-18,y2:ch-4,class:'push'},S);
+  el('polygon',{points:`${ax},${ch-2} ${ax-4},${ch-9} ${ax+4},${ch-9}`,class:'push-h'},S);
+  el('text',{x:ax+8,y:ch-9,class:'vt'},S).textContent='δ '+delta.toFixed(3);
+}
+
+/* ---------- animation ---------- */
+const wait=(ms,tk)=>new Promise(r=>setTimeout(()=>r(tk===token),ms));
+function dur(e){return reduce?0:(e.first?1000:200)/speed}
+function gapMs(e){return (e.first?180:40)/speed}
+function fly(e,ms,tk){
+  return new Promise(res=>{
+    const r=R.edges[e.e];r.g.classList.add('hot');
+    for(const id in R.nodes)R.nodes[id].g.classList.toggle('active',id===e.from);
+    if(ms<=0){res(true);return}
+    pkCore.classList.toggle('req',e.d>0);packet.style.display='';chip.style.display='';
+    chipText.textContent=e.p;const tw=chipText.getComputedTextLength()+12;chipRect.setAttribute('width',tw);chipText.setAttribute('x',6);chipText.setAttribute('y',12.5);
+    const t0=performance.now();
+    const step=now=>{
+      if(tk!==token){packet.style.display='none';chip.style.display='none';res(false);return}
+      const t=Math.min(1,(now-t0)/ms),k=t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;
+      const pt=r.p.getPointAtLength((e.d>0?k:1-k)*r.len);
+      packet.setAttribute('transform',`translate(${pt.x},${pt.y})`);
+      const cx=Math.max(4,Math.min(1106-tw,pt.x+10)),cy=Math.max(2,pt.y-26);
+      chip.setAttribute('transform',`translate(${cx},${cy})`);
+      if(t<1)requestAnimationFrame(step);else{packet.style.display='none';chip.style.display='none';res(true)}
+    };
+    requestAnimationFrame(step);
+  });
+}
+async function run(tk){
+  while(playing&&tk===token){
+    if(idx>=evs.length-1){playing=false;apply(idx);break}
+    const e=evs[idx+1];
+    if(!await fly(e,dur(e),tk))return;
+    apply(idx+1);
+    if(!await wait(gapMs(e),tk))return;
+  }
+}
+function stop(){playing=false;token++;packet&&(packet.style.display='none');chip&&(chip.style.display='none')}
+function play(){
+  if(playing){stop();apply(idx);return}
+  if(idx>=evs.length-1)idx=-1;
+  pinned=null;playing=true;token++;apply(idx);run(token);
+}
+async function stepOnce(){
+  stop();if(idx>=evs.length-1)return;
+  const tk=token,e=evs[idx+1];if(await fly(e,Math.min(dur(e),600),tk))apply(idx+1);
+}
+function skip(){
+  let j=evs.findIndex((e,k)=>k>idx&&(e.e==='build_closure'||e.e==='hist_loop'));
+  if(j<0)j=evs.length-1;
+  const was=playing;stop();apply(j);if(was){playing=true;token++;apply(j);run(token)}
+}
+function pin(id){stop();pinned=pinned===id?null:id;apply(idx);
+  if(window.innerWidth<=1180)$('card').scrollIntoView({behavior:reduce?'auto':'smooth',block:'start'})}
+
+/* ---------- controls ---------- */
+function seg(boxId,vals,label,cur,onPick){
+  const box=$(boxId);
+  vals.forEach(v=>{const b=document.createElement('button');b.type='button';b.textContent=label(v);b.dataset.v=v;b.setAttribute('aria-pressed',v===cur);
+    b.addEventListener('click',()=>{box.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b));onPick(v)});box.appendChild(b)});
+}
+seg('speed',SPEEDS,v=>v+'×',1,v=>{speed=v});
+seg('method',METHODS,v=>v,'gn',v=>load(v));
+$('play').addEventListener('click',play);
+$('step').addEventListener('click',stepOnce);
+$('skip').addEventListener('click',skip);
+$('reset').addEventListener('click',()=>{stop();pinned=null;apply(-1)});
+$('scrub').addEventListener('input',ev=>{stop();apply(+ev.target.value)});
+document.addEventListener('keydown',ev=>{
+  if(ev.target.closest&&ev.target.closest('input,button,.node'))return;
+  if(ev.key===' '){ev.preventDefault();play()}else if(ev.key==='ArrowRight'){ev.preventDefault();stepOnce()}
+});
+
+$('rev').textContent=M.rev+(M.dirty?' (커밋 안 된 수정 포함)':'');$('rec').textContent=M.recorded;$('cmd').textContent=M.cmd;
+buildMap();load('gn');
+window.__mjReady=()=>{try{document.head.appendChild(MathJax.svgStylesheet())}catch(err){}texCache.clear();if(cardId)renderCard(cardId,true)};
+if(window.MathJax&&MathJax.startup&&MathJax.startup.promise&&MathJax.tex2svg)window.__mjReady();
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>{for(const id in R.nodes){const v=R.nodes[id].val;R.nodes[id].val=undefined;setBadge(id,v)}for(const id in R.edges)R.edges[id].len=R.edges[id].p.getTotalLength()});
+</script>
+</body>
+</html>

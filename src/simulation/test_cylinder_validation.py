@@ -1,9 +1,5 @@
-"""##r## Three-stage current-pipeline cylinder study; no barrier strength change.
-
-1. Exact analytic cylinder versus RIMLS zero set, co-refining mesh and R.
-2. Fixed selected geometry/R: activation-distance sensitivity, Hertz reference.
-3. Identical final load/start: GN, local Gap SR1, aggregate Gap Structured BFGS.
-Static condensation is exact for the present constant linear FEM model only.
+"""원통 표면 오차와 접촉 활성거리 민감도 및 최종 하중의 해법 성능을 비교해요.
+현재 상수 선형 FEM에 대한 정확한 정적 축약을 사용해요.
 """
 import argparse
 import hashlib
@@ -28,16 +24,19 @@ def save_json(path,value):
 
 
 def surface_error(n_angle,n_axis,R,delta=.005,patch_half_width=1.2):
-    """Normal-ray zero displacement, measured against the exact cylinder.
+    r"""해석적 원통의 법선 방향에서 RIMLS 영점의 위치 오차를 구해요.
 
-    Nine by nine fixed analytic locations on each facing surface. This measures
-    local geometry bias, not FEM discretization or full contact-force accuracy.
+    $$s(\boldsymbol{x}_i+t_i\boldsymbol{n}_i)=0$$
+
+    영점까지의 법선 방향 거리 $t_i$를 ``offset``에 저장해요.
+    각 표면의 고정된 해석 위치 81곳에서 국소 형상 오차를 측정해요.
+    FEM 이산화나 전체 접촉력의 정확도를 검증하는 값은 아니에요.
     """
     rows=[];arrays={}
     for label,radius,facing,angle in (('lower',3.,'up',0.),('upper',5.,'down',45.)):
         m=make_cylinder(radius=radius,n_angle=n_angle,n_axis=n_axis,facing=facing,
             angle_degrees=angle,clearance=.03,patch_half_width=patch_half_width)
-        sampler,_,_=make_surface_sampler(m['nodes'],m['contact_faces'])
+        sampler,_,_=make_surface_sampler(m['nodes'],m['contact_faces'],sparse=True)
         with torch.no_grad():points,normals=sampler(torch.tensor(m['nodes'],dtype=torch.float64))
         x,y=np.meshgrid(np.linspace(-.3,.3,9),np.linspace(-.3,.3,9));x=x.ravel();y=y.ravel()
         sign=1. if facing=='up' else -1.

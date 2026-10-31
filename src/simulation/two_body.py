@@ -1,3 +1,4 @@
+"""두 선형 탄성체의 접촉과 준정적 평형 문제를 구성하고 풀어요."""
 import numpy as np
 import torch
 from src.geometry.mesh import make_block
@@ -9,7 +10,26 @@ from src.contact.barrier import barrier_value
 from src.contact.terms import multiple_contact_terms,multiple_contact_terms_sparse
 from src.optimization.newton import minimize_static
 
+
+def _make_query_sampler(reference,faces):
+    r"""질의면의 각 삼각형만 참조해 접촉 적분점을 보간해요.
+
+    $$\boldsymbol{q}_{fj}=\sum_{i=1}^{3}N_{ji}\boldsymbol{x}_{fi}$$
+    """
+    _,weights=surface_quadrature(reference,faces,sparse=True)
+    faces_t=torch.tensor(np.asarray(faces,dtype=int),dtype=torch.long)
+    barycentric=torch.tensor([[2/3,1/6,1/6],[1/6,2/3,1/6],[1/6,1/6,2/3]],dtype=torch.float64)
+    def sample(nodes):
+        r"""질의 삼각형의 세 절점으로 적분점 위치를 계산해요.
+
+        $$\boldsymbol{q}_{fj}=\sum_{i=1}^{3}N_{ji}\boldsymbol{x}_{fi}$$
+        """
+        # 질의점의 위치를 삼각형 안에서 보간해요: $$\boldsymbol{q}_{fj}=\sum_iN_{ji}\boldsymbol{x}_{fi}$$
+        return (barycentric@nodes[faces_t]).reshape(-1,3)
+    return sample,weights
+
 def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30.,R=1.5,d_hat=.2,nx=None,ny=None,nz=None,sparse=True,contact_meshes=None,closure_limit=None,poisson=.3):
+    """두 물체의 표면 지지 영역과 질의면을 구분해 준정적 문제를 구성해요."""
     limit=initial_gap if closure_limit is None else closure_limit  # ##r## curved indentation may exceed initial clearance
     if not all(np.isfinite(v) for v in (initial_gap,d_hat,closure,limit)) or not 0<initial_gap or not 0<d_hat or not 0<=closure<limit:
         raise ValueError('require positive initial_gap, d_hat and 0 <= closure < closure_limit')
@@ -47,11 +67,14 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
     prescribed=reference.copy();prescribed[size+3*top+2]-=closure
     free_t=torch.tensor(free,dtype=torch.long)
     prescribed_t=torch.tensor(prescribed,dtype=torch.float64)
-    sample_lower,_,_=make_surface_sampler(lower,lower_faces)
-    sample_upper,_,_=make_surface_sampler(upper,upper_faces)
-    Sl,wl=surface_quadrature(lower,lower_query);Su,wu=surface_quadrature(upper,upper_query)
-    Ql=torch.tensor(Sl,dtype=torch.float64);Qu=torch.tensor(Su,dtype=torch.float64)
-    same_lower=np.array_equal(lower_faces,lower_query);same_upper=np.array_equal(upper_faces,upper_query)
+    sample_lower,_,wl=make_surface_sampler(lower,lower_faces,sparse=True)
+    sample_upper,_,wu=make_surface_sampler(upper,upper_faces,sparse=True)
+    same_lower=np.array_equal(lower_faces,lower_query)
+    same_upper=np.array_equal(upper_faces,upper_query)
+    query_lower=None
+    query_upper=None
+    if not same_lower:query_lower,wl=_make_query_sampler(lower,lower_query)
+    if not same_upper:query_upper,wu=_make_query_sampler(upper,upper_query)
     weights=.5*np.r_[wu,wl]
     selection={"model":None};problem={}
     def set_closure(value):
@@ -74,7 +97,8 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         if ids is not None and ids.numel()==0:return state[:0]
         a=state[:size].reshape(-1,3);b=state[size:].reshape(-1,3)
         pl,nl=sample_lower(a);pu,nu=sample_upper(b)
-        ql=pl if same_lower else Ql@a;qu=pu if same_upper else Qu@b
+        ql=pl if same_lower else query_lower(a)
+        qu=pu if same_upper else query_upper(b)
         if ids is None:
             return torch.cat((rimls_values_torch(qu,pl,nl,R),rimls_values_torch(ql,pu,nu,R)))
         values=[];positions=[];split=len(wu)
@@ -107,6 +131,7 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
             dof_cache.update(ids=ids, local=np.sort(local[local >= 0]))
         return dof_cache['local']
     def contact(state,method,full=False,compute_hessian=True,return_gap_data=False):  # ##r##
+        """알려진 RIMLS 함수의 값 전용 경로와 접촉 미분을 연결해요."""
         w=current_weights();gap_function=gaps_full_ad if full else gaps_ad
         if not len(w):
             from scipy.sparse import csr_matrix
@@ -117,8 +142,9 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
                 empty.update(gap_indices=np.empty(0,dtype=int),gap_jacobian=np.empty((0,0)),
                              gap_weights=np.empty(0),gap_dofs=np.empty(0,dtype=int))
             return empty
-        return (multiple_contact_terms_sparse(state,gap_function,w,current_dofs(full),d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data)
-                if sparse else multiple_contact_terms(state,gap_function,w,d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data))
+        return (multiple_contact_terms_sparse(state,gap_function,w,current_dofs(full),d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function)
+                if sparse else multiple_contact_terms(state,gap_function,w,d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function))
+    ##r## Stable query/target keys and complete geometric supports for SR1.
     layout_cache={'identity':None}
     def contact_layout():
         model=selection['model']
@@ -197,6 +223,8 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         feasible=feasible,energy=energy,objective=objective,diagnostics=diagnostics,
         contact=contact,contact_layout=contact_layout,  # ##r## reusable multi-gap data
         free=free,fixed=fixed,size=size,weights=weights,prescribed=prescribed,closure=closure,d_hat=d_hat))
+    # 원래 함수의 동일성을 보관해 사용자 콜백으로 바뀌면 값 전용 최적화를 해제해요.
+    problem['_no_grad_gaps_ad']=gaps_ad
     return problem
 
 def solve(problem,method='gn',initial=None,max_iter=150,sr1_memory=5,tol=1e-8,track_rk=False):

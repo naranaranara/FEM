@@ -3,28 +3,46 @@
 !/.gitignore
 !/README.md
 !/pyproject.toml
+!/setup.py
 !/run.py
 !/src/
+!/tools/
 !/tests/
 /tests/*
 !/tests/test_automatic_contact.py
 !/tests/test_subset_contact.py
 !/tests/test_hertz_contact.py
+!/tests/test_mechanics_performance.py
+!/tests/test_contact_performance.py
+!/tests/test_collision_performance.py
+!/tests/test_rimls_kernel.py
+!/tests/test_sparse_hessian.py
+!/tests/test_patch_storage.py
+!/tests/test_native_full.py
+!/tests/test_hessian_performance.py
 !/tests/test_src_multi_gap_sr1.py
 
 __pycache__/
 *.py[cod]
+*.so
+*.pyd
 .pytest_cache/
 .venv/
 venv/
 *.egg-info/
 build/
 dist/
+/tools/flow_map/flow_map.html
 
 # Crossed-cylinder regression tests.
 !/tests/test_cylinder_validation.py
 !/tests/test_crossed_cylinders.py
 !/tests/test_structured_bfgs.py
+!/tests/test_cylinder_geometry_performance.py
+!/tests/test_cylinder_condensation_performance.py
+!/tests/test_cylinder_pipeline_performance.py
+!/tests/test_force_only_performance.py
+!/tests/test_native_values.py
 
 # Keep experiment outputs local.
 /experiments/

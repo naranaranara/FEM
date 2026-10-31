@@ -1,3 +1,4 @@
+"""상수 선형 탄성체의 내부 자유도를 정확히 축약해 접촉 문제를 풀어요."""
 import time
 import numpy as np
 import torch
@@ -21,6 +22,10 @@ def cholesky_direction(H,g,eigen_floor=1e-7):
 
 
 def condense_contact_problem(problem,batch=32):
+    r"""접촉 자유도를 남기고 내부 선형 탄성 자유도를 정확히 제거해요.
+
+    $$S=K_{cc}-K_{ci}K_{ii}^{-1}K_{ic}$$
+    """
     if not problem['sparse'] or problem.get('prepare') is not None:
         raise ValueError('condensation currently requires fixed contact patches and sparse constant FEM')
     tick=time.perf_counter()
@@ -28,16 +33,20 @@ def condense_contact_problem(problem,batch=32):
     retained=np.asarray(problem['contact_dofs'],dtype=int)
     interior=np.setdiff1d(np.arange(n),retained)
     if not len(retained):raise ValueError('contact DOFs required')
-    Kcc=K[retained][:,retained].toarray()
+    # 접촉 강성 블록으로 축약 행렬을 초기화해요: $$S\leftarrow K_{cc}$$
+    S=K[retained][:,retained].toarray()
     Kic=K[interior][:,retained].tocsc()
     Kci=Kic.T.tocsr()
     factor=splu(K[interior][:,interior].tocsc()) if len(interior) else None
-    S=Kcc.copy()
     if factor is not None:
         for start in range(0,len(retained),batch):
             stop=min(start+batch,len(retained))
+            # 열 묶음별로 내부 자유도의 영향을 제거해요: $$S_{:,b}\leftarrow S_{:,b}-K_{ci}K_{ii}^{-1}K_{ic,:,b}$$
             S[:,start:stop]-=Kci@factor.solve(Kic[:,start:stop].toarray())
-    S=.5*(S+S.T)
+    # 부동소수점 비대칭을 제거할 분자를 모아요: $$S\leftarrow S+S^T$$
+    np.add(S,S.T,out=S)
+    # 기존 축약 행렬과 같은 대칭화 계수를 적용해요: $$S\leftarrow S/2$$
+    S*=.5
     reference=problem['reference_flat'][problem['free']].copy()
     qc=reference[retained]
     ids_t=torch.tensor(retained,dtype=torch.long)
@@ -68,8 +77,11 @@ def condense_contact_problem(problem,batch=32):
         return float(.5*u@Su+cache['f']@u+cache['constant']),Su+cache['f'],S
     def feasible(q):return problem['feasible'](expand(q))
     def contact(q,method,return_gap_data=False):
+        """원래 간격 콜백에만 값 전용 경로를 허용해 축약 접촉을 계산해요."""
+        safe=problem.get('_no_grad_gaps_ad') is problem['gaps_ad']
         return multiple_contact_terms(q,gaps_ad,problem['weights'],d_hat=problem['d_hat'],
-            method=method,gaps_subset_autodiff=gaps_ad,return_gap_data=return_gap_data)
+            method=method,gaps_subset_autodiff=gaps_ad,return_gap_data=return_gap_data,
+            gaps_value_autodiff=gaps_ad if safe else None)
     old_keys,old_supports=problem['contact_layout']()
     remap=np.full(n,-1,dtype=int);remap[retained]=np.arange(len(retained))
     supports=[remap[np.asarray(ids,dtype=int)] for ids in old_supports]
@@ -83,8 +95,12 @@ def condense_contact_problem(problem,batch=32):
             C,data=model.correction(q,c,old_keys,supports,problem['d_hat'])
             H=H+C.toarray();info.update(data)
         elif method=='structured_bfgs_gap':
-            C,data=model.correction(q,c,H,problem['d_hat'])
-            H=H+C.toarray();info.update(data)
+            dense_correction=getattr(model,'correction_dense',None)
+            if callable(dense_correction):
+                C,data=dense_correction(q,c,H,problem['d_hat'])
+            else:
+                C,data=model.correction(q,c,H,problem['d_hat']);C=C.toarray()
+            H=H+C;info.update(data)
         return E+c['energy'],g+c['gradient'],H,info
     def energy(q):
         if not feasible(q):return np.inf

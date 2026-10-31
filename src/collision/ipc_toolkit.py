@@ -1,6 +1,38 @@
+"""독립 프로세스의 IPC Toolkit으로 충돌 후보와 안전한 이동 보폭을 계산해요."""
 import atexit,os,pickle,subprocess,sys
 from pathlib import Path
 import numpy as np
+
+def _pack_incidence(incidence):
+    """면 인접 집합을 연속 배열과 시작 위치로 묶어요."""
+    counts = np.fromiter(map(len, incidence), dtype=np.intp, count=len(incidence))
+    offsets = np.r_[0, np.cumsum(counts)]
+    values = np.fromiter((face for group in incidence for face in sorted(group)),
+                         dtype=np.intp, count=int(offsets[-1]))
+    return offsets, values
+
+
+def _incidence_pairs(candidates, first_incidence, second_incidence):
+    """후보 양쪽의 인접 면 조합을 한 번에 펼쳐요."""
+    first, second = candidates.T
+    second_offsets, second_values = second_incidence
+    second_counts = second_offsets[second + 1] - second_offsets[second]
+    if first_incidence is None:
+        first_counts = np.ones(len(first), dtype=np.intp)
+    else:
+        first_offsets, first_values = first_incidence
+        first_counts = first_offsets[first + 1] - first_offsets[first]
+    counts = first_counts * second_counts
+    starts = np.cumsum(counts) - counts
+    local = np.arange(counts.sum()) - np.repeat(starts, counts)
+    widths = np.repeat(second_counts, counts)
+    b = second_values[np.repeat(second_offsets[second], counts) + local % widths]
+    if first_incidence is None:
+        a = np.repeat(first, counts)
+    else:
+        a = first_values[np.repeat(first_offsets[first], counts) + local // widths]
+    return np.column_stack((a, b))
+
 
 class IPCMeshCollision:
     def __init__(self,positions,faces,body_ids,self_contact=False,python=None):
@@ -21,6 +53,8 @@ class IPCMeshCollision:
         for index,face in enumerate(self.faces):
             for vertex in face:self.vertex_faces[vertex].add(index)
         self.edge_faces=[self.vertex_faces[a]&self.vertex_faces[b] for a,b in self.edges]
+        self._vertex_incidence = _pack_incidence(self.vertex_faces)
+        self._edge_incidence = _pack_incidence(self.edge_faces)
         self.vertex_count=len(positions)
         env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1')
         self.process=subprocess.Popen([python or sys.executable,'-u',str(Path(__file__).with_name('_worker.py'))],
@@ -58,18 +92,39 @@ class IPCMeshCollision:
         result['edges']=self.edges.copy()
         return result
     def face_pairs(self,positions,search_distance):
-        """Expand FV/EE incidence to unique cross-body face pairs (conservative)."""
+        """충돌 후보를 물체 간의 중복 없는 면 쌍으로 보수적으로 확장해요."""
         data=self.candidate_topology(positions,float(search_distance)/2)
-        pairs=set()
-        def add(a,b):
-            if self.body_ids[self.faces[a,0]]!=self.body_ids[self.faces[b,0]]:
-                pairs.add(tuple(sorted((int(a),int(b)))))
-        for face,vertex in data['face_vertex_pairs']:
-            for adjacent in self.vertex_faces[vertex]:add(face,adjacent)
-        for first,second in data['edge_edge_pairs']:
-            for a in self.edge_faces[first]:
-                for b in self.edge_faces[second]:add(a,b)
-        return np.asarray(sorted(pairs),dtype=int).reshape(-1,2),data
+        fv = data['face_vertex_pairs']
+        ee = data['edge_edge_pairs']
+        labels = self.body_ids[self.faces[:, 0]]
+        if len(fv) + len(ee) < 32:
+            pairs=set()
+            def add(a,b):
+                """서로 다른 물체에 속하는 면 쌍을 추가해요."""
+                if labels[a] != labels[b]:
+                    pairs.add(tuple(sorted((int(a),int(b)))))
+            for face,vertex in fv:
+                for adjacent in self.vertex_faces[vertex]:add(face,adjacent)
+            for first,second in ee:
+                for a in self.edge_faces[first]:
+                    for b in self.edge_faces[second]:add(a,b)
+            return np.asarray(sorted(pairs),dtype=int).reshape(-1,2),data
+        chunks = []
+        for candidates, first_incidence, second_incidence in (
+                (fv, None, self._vertex_incidence),
+                (ee, self._edge_incidence, self._edge_incidence)):
+            for start in range(0, len(candidates), 4096):
+                pairs = _incidence_pairs(candidates[start:start + 4096],
+                                         first_incidence, second_incidence)
+                pairs = pairs[labels[pairs[:, 0]] != labels[pairs[:, 1]]]
+                if len(pairs):
+                    first = np.minimum(pairs[:, 0], pairs[:, 1])
+                    second = np.maximum(pairs[:, 0], pairs[:, 1])
+                    chunks.append(np.unique(first * len(self.faces) + second))
+        if not chunks:
+            return np.empty((0, 2), dtype=int), data
+        keys = np.unique(np.concatenate(chunks))
+        return np.column_stack((keys // len(self.faces), keys % len(self.faces))), data
     def close(self):
         process=getattr(self,'process',None)
         if process is None:return

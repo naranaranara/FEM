@@ -1,3 +1,4 @@
+"""물체 표면의 접촉 패치를 선택하고 미분 가능한 간격을 계산해요."""
 import numpy as np
 import torch
 from .surface import surface_quadrature,make_surface_sampler
@@ -63,20 +64,55 @@ def point_triangle_distances(point,triangles):
 
 class AutomaticRIMLSContact:
     def __init__(self,reference,faces,body_ids,collider,R=1.5,d_hat=.2,skin=.1):
+        """표면 연결과 희소 적분 정보를 준비해요."""
         if skin<=0 or d_hat<=0 or R<=0:raise ValueError('positive skin, barrier distance and support required')
         self.reference=np.asarray(reference,dtype=float);self.faces=np.asarray(faces,dtype=int)
         self.body_ids=np.asarray(body_ids,dtype=int);self.collider=collider
         self.R,self.d_hat,self.skin=R,d_hat,skin
-        self.S,self.reference_weights=surface_quadrature(self.reference,self.faces)
+        self._sparse_S,self.reference_weights=surface_quadrature(self.reference,self.faces,sparse=True)
+        self._dense_S=None;self._dense_blocks=None;self._query_blocks=[]
+        # 작은 보간 행렬은 조밀 곱셈을 사용해 질의별 인덱싱 비용을 줄여요.
+        if self._sparse_S.shape[0]*self._sparse_S.shape[1]<=16384:
+            self._dense_S=self._sparse_S.toarray()
+        self._barycentric=torch.tensor([[2/3,1/6,1/6],[1/6,2/3,1/6],[1/6,1/6,2/3]],dtype=torch.float64)
         self.groups=smooth_face_components(self.reference,self.faces,self.body_ids)
         self.group_ids=np.empty(len(self.faces),dtype=int);self.samplers=[]
         for gid,group in enumerate(self.groups):
             self.group_ids[group]=gid
-            sample,_,_=make_surface_sampler(self.reference,self.faces[group]);self.samplers.append(sample)
-        self.signature=();self.blocks=[];self.weights=np.empty(0);self.contact_dofs=np.empty(0,dtype=int)
+            sample,_,_=make_surface_sampler(self.reference,self.faces[group],sparse=True);self.samplers.append(sample)
+        self.signature=();self.weights=np.empty(0);self.contact_dofs=np.empty(0,dtype=int)
         self.query_ids=np.empty(0,dtype=int);self.updates=0;self.initialized=False
         self.info={}
+    @property
+    def S(self):
+        """명시적으로 요청한 경우에만 기존 조밀 보간 행렬을 만들어요."""
+        if self._dense_S is None:
+            self._dense_S=self._sparse_S.toarray()
+        return self._dense_S
+
+    @S.setter
+    def S(self,value):
+        """외부에서 지정한 보간 행렬을 기존 공개 인터페이스대로 보관해요."""
+        self._dense_S=value
+
+    @property
+    def blocks(self):
+        """명시적으로 요청한 경우에만 기존 조밀 접촉 블록을 만들어요."""
+        if self._dense_blocks is None:
+            self._dense_blocks=[]
+            for gid,vertices,shape in self._query_blocks:
+                matrix=shape.new_zeros((len(vertices),len(self.reference)))
+                matrix.scatter_(1,vertices,shape)
+                self._dense_blocks.append((gid,matrix))
+        return self._dense_blocks
+
+    @blocks.setter
+    def blocks(self,value):
+        """외부에서 지정한 접촉 블록을 기존 공개 인터페이스대로 보관해요."""
+        self._dense_blocks=value
+
     def refresh(self,positions,before_change=None):
+        """현재 위치에서 접촉 패치를 갱신하고 바뀐 질의만 다시 구성해요."""
         positions=np.asarray(positions,dtype=float);normals=face_normals(positions,self.faces)
         centers=positions[self.faces].mean(axis=1);distance=self.d_hat+self.skin
         pairs,data=self.collider.face_pairs(positions,distance)
@@ -91,7 +127,8 @@ class AutomaticRIMLSContact:
         for a,b in facing:
             requests.setdefault(int(self.group_ids[b]),set()).update(range(3*a,3*a+3))
             requests.setdefault(int(self.group_ids[a]),set()).update(range(3*b,3*b+3))
-        query_positions=self.S@positions;options={}
+        interpolation=self._sparse_S if self._dense_S is None else self._dense_S
+        query_positions=interpolation@positions;options={}
         for gid,queries in sorted(requests.items()):
             group=self.groups[gid];triangles=positions[self.faces[group]]
             ids=np.asarray(sorted(queries),dtype=int)
@@ -114,10 +151,17 @@ class AutomaticRIMLSContact:
             if self.initialized and before_change is not None:before_change()
             self.signature=signature;self.query_ids=np.asarray([q for q,g in signature],dtype=int)
             self.weights=.5*self.reference_weights[self.query_ids]
-            self.blocks=[];vertices=set()
+            self._query_blocks=[]
+            self._dense_blocks=[] if self._dense_S is not None else None
+            vertices=set()
             for gid in sorted({g for q,g in signature}):
                 ids=np.asarray([q for q,g in signature if g==gid],dtype=int)
-                self.blocks.append((gid,torch.tensor(self.S[ids],dtype=torch.float64)))
+                if self._dense_S is None:
+                    query_vertices=torch.tensor(self.faces[ids//3],dtype=torch.long)
+                    shape=self._barycentric[torch.tensor(ids%3,dtype=torch.long)]
+                    self._query_blocks.append((gid,query_vertices,shape))
+                else:
+                    self._dense_blocks.append((gid,torch.tensor(self._dense_S[ids],dtype=torch.float64)))
                 vertices.update(self.faces[self.groups[gid]].ravel())
                 vertices.update(self.faces[ids//3].ravel())
             self.contact_dofs=(3*np.asarray(sorted(vertices),dtype=int)[:,None]+np.arange(3)).ravel()
@@ -126,23 +170,39 @@ class AutomaticRIMLSContact:
             contact_samples=len(self.weights),patch_changed=changed,patch_updates=self.updates)
         return self.info.copy()
     def gaps(self, state, indices=None):
+        r"""각 질의의 세 절점 보간으로 선택한 RIMLS 간격을 계산해요.
+
+        $$\boldsymbol{x}_q=\sum_{i=1}^{3}N_{qi}\boldsymbol{x}_{v_{qi}}$$
+        """
         if not self.initialized:raise RuntimeError('refresh contact patches before evaluating gaps')
         ids = None if indices is None else normalize_query_indices(indices, len(self.weights), state.device)
         if ids is not None and ids.numel() == 0:return state[:0]
         nodes=state.reshape(-1,3);values=[];positions=[];offset=0
-        for gid,St in self.blocks:
+        compact=self._dense_blocks is None
+        blocks=self._query_blocks if compact else self._dense_blocks
+        for block in blocks:
+            gid=block[0];interpolation=block[1]
+            shape=block[2] if compact else None
             if ids is not None:
-                next_offset=offset+len(St)
+                next_offset=offset+len(interpolation)
                 slots=torch.nonzero((ids>=offset)&(ids<next_offset),as_tuple=False).reshape(-1)
                 local_ids=ids[slots]-offset;offset=next_offset
                 if slots.numel()==0:continue
-                St=St.index_select(0,local_ids)
+                interpolation=interpolation.index_select(0,local_ids)
+                if compact:shape=shape.index_select(0,local_ids)
                 positions.append(slots)
+            if compact:
+                # 질의 좌표를 세 절점에서 보간해요: $$\boldsymbol{x}_q=\sum_iN_{qi}\boldsymbol{x}_{v_{qi}}$$
+                queries=torch.sum(shape[:,:,None]*nodes[interpolation],dim=1)
+            else:
+                # 공개 조밀 블록이 지정되면 기존 보간을 사용해요: $$X_q=S_qX$$
+                queries=interpolation@nodes
             points,normals=self.samplers[gid](nodes)
-            values.append(rimls_values_torch(St@nodes,points,normals,self.R))
+            values.append(rimls_values_torch(queries,points,normals,self.R))
         if not values:return state[:0]
         result=torch.cat(values)
         return result if ids is None else result[torch.argsort(torch.cat(positions))]
     def max_step(self,start,end):
+        """패치 탐색 여유보다 작은 절점 이동을 허용해요."""
         movement=float(np.linalg.norm(np.asarray(end)-np.asarray(start),axis=1).max())
         return min(1.,self.skin/(4*movement)) if movement>0 else 1.
