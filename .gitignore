@@ -20,3 +20,14 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# Reproducible crossed-cylinder study and its regression tests.
+!/tests/test_cylinder_validation.py
+!/tests/test_crossed_cylinders.py
+!/tests/test_structured_bfgs.py
+!/experiments/
+/experiments/*
+!/experiments/CYLINDER_VALIDATION.md
+!/experiments/cylinder_validation_results/
+/experiments/cylinder_validation_results/*
+!/experiments/cylinder_validation_results/2026-10-31_130924/

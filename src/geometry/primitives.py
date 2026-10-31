@@ -48,7 +48,7 @@ def sample_saddle(curvature=.7,n=33,half_width=1.6):
     normals/=np.linalg.norm(normals,axis=1,keepdims=True)
     return points,normals
 
-##r## Coordinate warp only: connectivity is supplied by mesh.make_block.
+
 def curve_patch_nodes(nodes,amplitude=.12):
     result=np.asarray(nodes,dtype=float).copy()
     low,high=result.min(axis=0),result.max(axis=0)
@@ -59,3 +59,33 @@ def curve_patch_nodes(nodes,amplitude=.12):
     result[:,2]-=high[2]
     result[:,2]+=layer*amplitude*(x*x-y*y)
     return result
+
+
+def cylinder_sag(x, radius):
+    x = np.asarray(x, dtype=float)
+    if not np.isfinite(radius) or radius <= 0 or np.any(~np.isfinite(x)) or np.any(np.abs(x) >= radius):
+        raise ValueError('finite transverse coordinates must satisfy abs(x) < radius')
+    return x*x / (radius + np.sqrt(radius*radius - x*x))
+
+
+def crossed_cylinder_curvature(radius_lower, radius_upper, angle_degrees):
+    if min(radius_lower, radius_upper) <= 0 or not all(np.isfinite(v) for v in (radius_lower, radius_upper, angle_degrees)):
+        raise ValueError('positive finite radii and finite angle required')
+    theta = np.deg2rad(angle_degrees)
+    transverse = np.array([np.cos(theta), np.sin(theta)])
+    K = np.diag([1./radius_lower, 0.]) + np.outer(transverse, transverse)/radius_upper
+    curvature, directions = np.linalg.eigh(K)
+    if curvature[0] <= 1e-12 * curvature[-1]:
+        raise ValueError('parallel cylinders require a line-contact reference')
+    return K, curvature, directions
+
+
+# ##r## A geometric default, fixed from the initial scene rather than iterates.
+def size_based_activation_distance(points, ratio=1e-3):
+    points=np.asarray(points,dtype=float)
+    if points.ndim!=2 or points.shape[1]!=3 or len(points)<2 or np.any(~np.isfinite(points)):
+        raise ValueError('finite scene points of shape (N,3) required')
+    if not np.isfinite(ratio) or ratio<=0:raise ValueError('positive finite activation ratio required')
+    length=float(np.linalg.norm(np.ptp(points,axis=0)))
+    if length<=0:raise ValueError('scene must have nonzero size')
+    return ratio*length,length

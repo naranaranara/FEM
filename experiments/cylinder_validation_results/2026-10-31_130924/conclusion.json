@@ -1,0 +1,66 @@
+{
+  "status": "complete",
+  "selected_geometry": {
+    "n_angle": 128,
+    "n_axis": 25,
+    "R": 0.1625,
+    "bodies": [
+      {
+        "body": "lower",
+        "nodes": 3225,
+        "target_faces": 640,
+        "samples": 1920,
+        "field_mae": 0.00018502266753811855,
+        "zero_error_max": 0.000403496039507445,
+        "zero_error_mae": 0.00018502329398926786,
+        "zero_error_over_delta": 0.080699207901489,
+        "root_residual": 1.4510360005469229e-12
+      },
+      {
+        "body": "upper",
+        "nodes": 3225,
+        "target_faces": 512,
+        "samples": 1536,
+        "field_mae": 0.00012398886118741604,
+        "zero_error_max": 0.0002140433978638612,
+        "zero_error_mae": 0.00012398901308188214,
+        "zero_error_over_delta": 0.04280867957277224,
+        "root_residual": 1.4518287007991356e-12
+      }
+    ],
+    "zero_error_max": 0.000403496039507445,
+    "passed": true
+  },
+  "selected_d_hat": 0.0005,
+  "hertz_validation_passed": false,
+  "interpretation": "activation sensitivity is small; finite-domain and volume-mesh convergence remain unverified",
+  "summary": [
+    {
+      "method": "gn",
+      "converged": 3,
+      "repeats": 3,
+      "median_wall_s": 68.30627189999996,
+      "median_updates": 9.0,
+      "retained_difference_from_gn": 0.0,
+      "force": 0.09184139383905018
+    },
+    {
+      "method": "sr1_gap",
+      "converged": 3,
+      "repeats": 3,
+      "median_wall_s": 71.5243428,
+      "median_updates": 9.0,
+      "retained_difference_from_gn": 4.255786185779042e-13,
+      "force": 0.09184139384770691
+    },
+    {
+      "method": "structured_bfgs_gap",
+      "converged": 3,
+      "repeats": 3,
+      "median_wall_s": 72.12898009999992,
+      "median_updates": 9.0,
+      "retained_difference_from_gn": 4.1318934613719645e-13,
+      "force": 0.09184139384026771
+    }
+  ]
+}

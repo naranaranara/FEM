@@ -1,0 +1,101 @@
+import time
+import numpy as np
+import torch
+from scipy.sparse.linalg import splu
+from scipy.linalg import cho_factor,cho_solve
+from src.contact.terms import multiple_contact_terms
+from src.contact.barrier import barrier_value
+
+
+def cholesky_direction(H,g,eigen_floor=1e-7):
+    H=np.asarray(H,dtype=float);H=.5*(H+H.T)
+    shift=0.
+    try:factor=cho_factor(H,check_finite=False)
+    except np.linalg.LinAlgError:
+        shift=max(0.,eigen_floor-float(np.linalg.eigvalsh(H)[0]))
+        factor=cho_factor(H+shift*np.eye(len(g)),check_finite=False)
+    p=cho_solve(factor,-g,check_finite=False)
+    if not np.all(np.isfinite(p)):raise np.linalg.LinAlgError('nonfinite condensed direction')
+    if g@p>=0:p=-g
+    return p,shift
+
+
+def condense_contact_problem(problem,batch=32):
+    if not problem['sparse'] or problem.get('prepare') is not None:
+        raise ValueError('condensation currently requires fixed contact patches and sparse constant FEM')
+    tick=time.perf_counter()
+    K=problem['stiffness_free'].tocsr();n=K.shape[0]
+    retained=np.asarray(problem['contact_dofs'],dtype=int)
+    interior=np.setdiff1d(np.arange(n),retained)
+    if not len(retained):raise ValueError('contact DOFs required')
+    Kcc=K[retained][:,retained].toarray()
+    Kic=K[interior][:,retained].tocsc()
+    Kci=Kic.T.tocsr()
+    factor=splu(K[interior][:,interior].tocsc()) if len(interior) else None
+    S=Kcc.copy()
+    if factor is not None:
+        for start in range(0,len(retained),batch):
+            stop=min(start+batch,len(retained))
+            S[:,start:stop]-=Kci@factor.solve(Kic[:,start:stop].toarray())
+    S=.5*(S+S.T)
+    reference=problem['reference_flat'][problem['free']].copy()
+    qc=reference[retained]
+    ids_t=torch.tensor(retained,dtype=torch.long)
+    reference_t=torch.tensor(reference,dtype=torch.float64)
+    cache={};result={}
+    def refresh():
+        E,g,_=problem['base'](reference)
+        fi=g[interior]
+        eliminated=factor.solve(fi) if factor is not None else fi
+        cache.update(fi=fi,f=g[retained]-Kci@eliminated,
+                     constant=float(E-.5*fi@eliminated))
+    def set_closure(value):
+        problem['set_closure'](value);refresh();result['closure']=float(value)
+    refresh()
+    def expand(q):
+        q=np.asarray(q,dtype=float)
+        if q.shape!=qc.shape:raise ValueError('invalid condensed coordinates')
+        x=reference.copy();x[retained]=q
+        if factor is not None:
+            x[interior]-=factor.solve(Kic@(q-qc)+cache['fi'])
+        return x
+    def full_state(q):return problem['full_state'](expand(q))
+    def gaps_ad(q,indices=None):
+        full=reference_t.index_copy(0,ids_t,q)
+        return problem['gaps_ad'](full,indices=indices)
+    def base(q):
+        u=q-qc;Su=S@u
+        return float(.5*u@Su+cache['f']@u+cache['constant']),Su+cache['f'],S
+    def feasible(q):return problem['feasible'](expand(q))
+    def contact(q,method,return_gap_data=False):
+        return multiple_contact_terms(q,gaps_ad,problem['weights'],d_hat=problem['d_hat'],
+            method=method,gaps_subset_autodiff=gaps_ad,return_gap_data=return_gap_data)
+    old_keys,old_supports=problem['contact_layout']()
+    remap=np.full(n,-1,dtype=int);remap[retained]=np.arange(len(retained))
+    supports=[remap[np.asarray(ids,dtype=int)] for ids in old_supports]
+    if any(np.any(ids<0) for ids in supports):raise ValueError('condensed support misses a geometric dependency')
+    def objective(q,method,model=None):
+        learned=method in ('sr1_gap','structured_bfgs_gap')
+        if learned and model is None:raise ValueError('curvature model required')
+        E,g,H=base(q);c=contact(q,'gn' if learned else method,return_gap_data=learned)
+        H=H+c['hessian'];info=dict(min_gap=c['min_gap'],filter_count=c['filter_count'])
+        if method=='sr1_gap':
+            C,data=model.correction(q,c,old_keys,supports,problem['d_hat'])
+            H=H+C.toarray();info.update(data)
+        elif method=='structured_bfgs_gap':
+            C,data=model.correction(q,c,H,problem['d_hat'])
+            H=H+C.toarray();info.update(data)
+        return E+c['energy'],g+c['gradient'],H,info
+    def energy(q):
+        if not feasible(q):return np.inf
+        try:gaps=gaps_ad(torch.tensor(q,dtype=torch.float64)).detach().numpy()
+        except ValueError:return np.inf
+        if np.any(~np.isfinite(gaps)) or np.any(gaps<=0):return np.inf
+        return base(q)[0]+float(problem['weights']@np.array([barrier_value(s,problem['d_hat']) for s in gaps]))
+    result.update(initial=problem['initial'][retained].copy(),expand=expand,full_state=full_state,
+        unpack=lambda q:problem['unpack'](expand(q)),base=base,energy=energy,objective=objective,
+        feasible=feasible,gaps_ad=gaps_ad,diagnostics=lambda q:problem['diagnostics'](expand(q)),
+        set_closure=set_closure,closure=problem['closure'],direction_solver=cholesky_direction,
+        d_hat=problem['d_hat'],weights=problem['weights'],retained=retained,
+        original=problem,stiffness_free=S,condensation_s=time.perf_counter()-tick)
+    return result

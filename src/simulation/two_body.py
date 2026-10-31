@@ -2,50 +2,62 @@ import numpy as np
 import torch
 from src.geometry.mesh import make_block
 from src.mechanics.solid import assemble_stiffness,tetrahedron_volumes
-from src.geometry.surface import bottom_faces,make_surface_sampler  # ##r## shared surface utilities
+from src.geometry.surface import bottom_faces,make_surface_sampler,surface_quadrature  # ##r## shared surface utilities
 from src.geometry.rimls import rimls_values_torch
 from src.geometry.contact_patches import normalize_query_indices  # ##r##
 from src.contact.barrier import barrier_value
 from src.contact.terms import multiple_contact_terms,multiple_contact_terms_sparse
 from src.optimization.newton import minimize_static
 
-def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30.,R=1.5,d_hat=.2,nx=None,ny=None,nz=None,sparse=True):
-    if not 0<initial_gap or not 0<d_hat or not 0<=closure<initial_gap:
-        raise ValueError('require 0 <= closure < initial_gap and d_hat > 0')
+def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30.,R=1.5,d_hat=.2,nx=None,ny=None,nz=None,sparse=True,contact_meshes=None,closure_limit=None,poisson=.3):
+    limit=initial_gap if closure_limit is None else closure_limit  # ##r## curved indentation may exceed initial clearance
+    if not all(np.isfinite(v) for v in (initial_gap,d_hat,closure,limit)) or not 0<initial_gap or not 0<d_hat or not 0<=closure<limit:
+        raise ValueError('require positive initial_gap, d_hat and 0 <= closure < closure_limit')
     if min(young_lower,young_upper,R)<=0:raise ValueError('positive stiffness and R required')
     defaults=(n,n,n) if n is not None else (3,3,2)
     counts=tuple(default if value is None else value for value,default in zip((nx,ny,nz),defaults))
-    meshes=[make_block(width=1.,depth=1.,height=.4,nx=counts[0],ny=counts[1],nz=counts[2]) for _ in range(2)]
+    meshes=([make_block(width=1.,depth=1.,height=.4,nx=counts[0],ny=counts[1],nz=counts[2]) for _ in range(2)]
+            if contact_meshes is None else list(contact_meshes))
+    if len(meshes)!=2 or meshes[0]['nodes'].shape!=meshes[1]['nodes'].shape:
+        raise ValueError('two meshes with matching node counts required')
     lower=meshes[0]['nodes'].copy();upper=meshes[1]['nodes'].copy()
-    upper[:,2]+=.4+initial_gap
+    if contact_meshes is None:upper[:,2]+=.4+initial_gap
+    else:counts=tuple(meshes[0].get('counts',counts))
+    lower_faces=meshes[0]['contact_faces'] if 'contact_faces' in meshes[0] else meshes[0]['top_faces']
+    upper_faces=meshes[1]['contact_faces'] if 'contact_faces' in meshes[1] else bottom_faces(meshes[1])
+    lower_query=meshes[0].get('query_faces',lower_faces)  # ##r## full cylinders keep a wider normal-support patch
+    upper_query=meshes[1].get('query_faces',upper_faces)
     references=[lower,upper];size=lower.size
     reference=np.concatenate([a.ravel() for a in references])
-    stiffnesses=[assemble_stiffness(ref,m['tetrahedra'],young=E,sparse=sparse)
+    stiffnesses=[assemble_stiffness(ref,m['tetrahedra'],young=E,poisson=poisson,sparse=sparse)
                  for ref,m,E in zip(references,meshes,(young_lower,young_upper))]
     if sparse:
         from scipy.sparse import block_diag
         K=block_diag(stiffnesses,format='csr')
     else:
         K=np.zeros((2*size,2*size));K[:size,:size]=stiffnesses[0];K[size:,size:]=stiffnesses[1]
-    bottom=meshes[0]['bottom_nodes'];top=np.unique(meshes[1]['top_faces'])
+    bottom=meshes[0].get('support_nodes',meshes[0]['bottom_nodes']);top=meshes[1].get('support_nodes',np.unique(meshes[1]['top_faces']))
     fixed=np.r_[(3*bottom[:,None]+np.arange(3)).ravel(),size+(3*top[:,None]+np.arange(3)).ravel()]
     free=np.setdiff1d(np.arange(2*size),fixed)
     Kf=K[free][:,free] if sparse else K[np.ix_(free,free)]  # ##r## slice once
-    lower_surface=np.unique(meshes[0]['top_faces']);upper_surface=np.unique(bottom_faces(meshes[1]))
+    lower_surface=np.unique(lower_faces);upper_surface=np.unique(upper_faces)
     surface_dofs=np.r_[(3*lower_surface[:,None]+np.arange(3)).ravel(),
                        size+(3*upper_surface[:,None]+np.arange(3)).ravel()]
     contact_dofs=np.flatnonzero(np.isin(free,surface_dofs))
     prescribed=reference.copy();prescribed[size+3*top+2]-=closure
     free_t=torch.tensor(free,dtype=torch.long)
     prescribed_t=torch.tensor(prescribed,dtype=torch.float64)
-    sample_lower,Sl,wl=make_surface_sampler(lower,meshes[0]['top_faces'])
-    sample_upper,Su,wu=make_surface_sampler(upper,bottom_faces(meshes[1]))
+    sample_lower,_,_=make_surface_sampler(lower,lower_faces)
+    sample_upper,_,_=make_surface_sampler(upper,upper_faces)
+    Sl,wl=surface_quadrature(lower,lower_query);Su,wu=surface_quadrature(upper,upper_query)
+    Ql=torch.tensor(Sl,dtype=torch.float64);Qu=torch.tensor(Su,dtype=torch.float64)
+    same_lower=np.array_equal(lower_faces,lower_query);same_upper=np.array_equal(upper_faces,upper_query)
     weights=.5*np.r_[wu,wl]
     selection={"model":None};problem={}
     def set_closure(value):
         """Update Dirichlet data while reusing the reference mesh and stiffness."""
-        if not np.isfinite(value) or not 0 <= value < initial_gap:
-            raise ValueError('require 0 <= closure < initial_gap')
+        if not np.isfinite(value) or not 0 <= value < limit:
+            raise ValueError('require 0 <= closure < closure_limit')
         prescribed[:] = reference
         prescribed[size+3*top+2] -= value
         prescribed_t.copy_(torch.as_tensor(prescribed, dtype=torch.float64))
@@ -62,15 +74,16 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         if ids is not None and ids.numel()==0:return state[:0]
         a=state[:size].reshape(-1,3);b=state[size:].reshape(-1,3)
         pl,nl=sample_lower(a);pu,nu=sample_upper(b)
+        ql=pl if same_lower else Ql@a;qu=pu if same_upper else Qu@b
         if ids is None:
-            return torch.cat((rimls_values_torch(pu,pl,nl,R),rimls_values_torch(pl,pu,nu,R)))
+            return torch.cat((rimls_values_torch(qu,pl,nl,R),rimls_values_torch(ql,pu,nu,R)))
         values=[];positions=[];split=len(wu)
         upper_slots=torch.nonzero(ids<split,as_tuple=False).reshape(-1)
         lower_slots=torch.nonzero(ids>=split,as_tuple=False).reshape(-1)
         if upper_slots.numel():
-            values.append(rimls_values_torch(pu[ids[upper_slots]],pl,nl,R));positions.append(upper_slots)
+            values.append(rimls_values_torch(qu[ids[upper_slots]],pl,nl,R));positions.append(upper_slots)
         if lower_slots.numel():
-            values.append(rimls_values_torch(pl[ids[lower_slots]-split],pu,nu,R));positions.append(lower_slots)
+            values.append(rimls_values_torch(ql[ids[lower_slots]-split],pu,nu,R));positions.append(lower_slots)
         return torch.cat(values)[torch.argsort(torch.cat(positions))]
     def gaps_ad(state, indices=None):
         full = prescribed_t.index_copy(0, free_t, state)
@@ -106,7 +119,6 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
             return empty
         return (multiple_contact_terms_sparse(state,gap_function,w,current_dofs(full),d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data)
                 if sparse else multiple_contact_terms(state,gap_function,w,d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data))
-    ##r## Stable query/target keys and complete geometric supports for SR1.
     layout_cache={'identity':None}
     def contact_layout():
         model=selection['model']
@@ -120,8 +132,8 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         if model is None:
             node_offset=len(lower)
             for query_faces,query_offset,target in (
-                (bottom_faces(meshes[1]),node_offset,lower_surface),
-                (meshes[0]['top_faces'],0,upper_surface+node_offset)):
+                (upper_query,node_offset,lower_surface),
+                (lower_query,0,upper_surface+node_offset)):
                 for face in query_faces:
                     ids=support(np.unique(np.r_[target,face+query_offset]))
                     for _ in range(3):
@@ -139,18 +151,22 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         except ValueError:return np.inf
         if not np.all(np.isfinite(s)) or np.any(s<=0):return np.inf
         return base(state)[0]+float(current_weights()@np.array([barrier_value(v,d_hat) for v in s]))
-    ##r## Correct only the Hessian; retain the existing energy and gradient.
     def objective(state,method,curvature_model=None):
         use_sr1=method=='sr1_gap'
-        if use_sr1 and curvature_model is None:
-            raise ValueError('sr1_gap requires a per-solve MultiGapSR1 model')
+        use_bfgs=method=='structured_bfgs_gap'
+        if (use_sr1 or use_bfgs) and curvature_model is None:
+            raise ValueError('curvature method requires a per-solve model')
         E,g,H=base(state)
-        c=contact(state,'gn' if use_sr1 else method,return_gap_data=use_sr1)
+        c=contact(state,'gn' if use_sr1 or use_bfgs else method,return_gap_data=use_sr1 or use_bfgs)
         total_H=H+c['hessian']
         info=dict(min_gap=c['min_gap'],filter_count=c['filter_count'])
         if use_sr1:
             keys,supports=contact_layout()
             correction,learned=curvature_model.correction(state,c,keys,supports,d_hat)
+            total_H=total_H+(correction if sparse else correction.toarray())
+            info.update(learned)
+        if use_bfgs:  # ##r## Same GN, energy and forces as other methods.
+            correction,learned=curvature_model.correction(state,c,total_H,d_hat)
             total_H=total_H+(correction if sparse else correction.toarray())
             info.update(learned)
         if selection['model'] is not None:info.update(selection['model'].info)
@@ -183,16 +199,35 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         free=free,fixed=fixed,size=size,weights=weights,prescribed=prescribed,closure=closure,d_hat=d_hat))
     return problem
 
-##r## Keep the same energy, line search and CCD for every Hessian method.
-def solve(problem,method='gn',initial=None,max_iter=150,sr1_memory=5):
-    if method not in ('full','gn','filtered_gn','sr1_gap'):raise ValueError(method)
+def solve(problem,method='gn',initial=None,max_iter=150,sr1_memory=5,tol=1e-8,track_rk=False):
+    if method not in ('full','gn','filtered_gn','sr1_gap','structured_bfgs_gap'):raise ValueError(method)
+    if track_rk and method!='gn':raise ValueError('r_k recording currently requires GN')
     start=problem['initial'] if initial is None else np.asarray(initial,dtype=float)
     model=None
     if method=='sr1_gap':
         from src.optimization.sr1 import MultiGapSR1
         model=MultiGapSR1(memory=sr1_memory)
-    result=minimize_static(start,lambda x:problem['objective'](x,method,model),problem['energy'],
-                           max_iter=max_iter,tol=1e-8,max_step=problem.get('max_step'),prepare=problem.get('prepare'))
+    elif method=='structured_bfgs_gap':  # ##r## comparison baseline
+        from src.optimization.structured_bfgs import MultiGapStructuredBFGS
+        model=MultiGapStructuredBFGS()
+    previous=[None]
+    def objective(x):
+        E,g,H,info=problem['objective'](x,method,model)
+        if track_rk:  # ##r## No extra gradient or exact gap Hessian evaluations.
+            info=dict(info,rk=None)
+            if previous[0] is not None:
+                old_x,old_g,old_H=previous[0]
+                d=x-old_x;denominator=float(d@(old_H@d))
+                numerator=float(d@(g-old_g))
+                info.update(rk_numerator=numerator,rk_denominator=denominator,
+                            rk_step_norm=float(np.linalg.norm(d)))
+                if denominator>1e-30 and np.isfinite(numerator):info['rk']=numerator/denominator
+            previous[0]=(x.copy(),g.copy(),H.copy())
+        return E,g,H,info
+    result=minimize_static(start,objective,problem['energy'],
+                           max_iter=max_iter,tol=tol,max_step=problem.get('max_step'),prepare=problem.get('prepare'),
+                           direction_solver=problem.get('direction_solver'))
     if model is not None:
-        result.update(model.totals,sr1_memory=sr1_memory)
+        result.update(model.totals)
+        if method=='sr1_gap':result['sr1_memory']=sr1_memory
     return result

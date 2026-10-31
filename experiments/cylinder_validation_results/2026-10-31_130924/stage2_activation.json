@@ -1,0 +1,26 @@
+[
+  {
+    "d_hat": 0.001,
+    "all_loads_converged": true,
+    "preparation_s": 24.379284800000004,
+    "condensation_s": 19.248373599999997,
+    "force": 0.09184998817733216,
+    "hertz_force": 0.019473546966981097,
+    "force_error": 3.7166542557999787,
+    "force_change": null,
+    "status": "converged",
+    "load_count": 12
+  },
+  {
+    "d_hat": 0.0005,
+    "all_loads_converged": true,
+    "preparation_s": 24.81264969999995,
+    "condensation_s": 17.887629999999945,
+    "force": 0.09184139384509296,
+    "hertz_force": 0.019473546966981097,
+    "force_error": 3.7162129221151714,
+    "force_change": 9.357798133694523e-05,
+    "status": "converged",
+    "load_count": 12
+  }
+]

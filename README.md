@@ -90,3 +90,11 @@ tests/            src만 사용하는 독립 검증
 소변형 선형 탄성체의 준정적 접촉을 대상으로 합니다. 일반적인 대변형, 천, self-contact, 완전한 동역학 드라이버는 아직 검증하지 않았습니다. `cloth.py`는 미구현 인터페이스입니다. CCD는 명시적 삼각형과 선형 절점 궤적을 보호하며 재구성된 RIMLS 영면의 무교차를 보장하는 것은 아닙니다.
 
 헤르츠 예제는 구면 하부를 가진 유한 탄성체와 강체 평면의 비교입니다. 메시와 경계조건 오차가 남아 있으므로 해석해와의 완전한 일치를 주장하지 않습니다. SR1 보정 행렬은 희소 행렬로 명시적으로 조립하며, 대규모 matrix-free 확장은 아직 검증하지 않았습니다.
+
+## Three-stage cylinder validation (learning runner)
+
+```powershell
+python -B -u run.py cylinder-validation --repeats 3 --steps 8
+```
+
+`src/simulation/test_cylinder_validation.py` checks surface zero-set errors, activation-distance sensitivity and a final-load GN / Gap SR1 / Gap Structured BFGS comparison. Results are checkpointed under `experiments/cylinder_validation_results/`. See `experiments/CYLINDER_VALIDATION.md` locally for assumptions and output descriptions. Static condensation is exact for the current constant linear FEM model; the timing excludes preparation and the shared loading path. Radial FEM mesh and domain-size convergence remain unverified. No barrier strength parameter is added.
