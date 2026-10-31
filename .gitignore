@@ -21,15 +21,10 @@ venv/
 build/
 dist/
 
-# Reproducible crossed-cylinder study and its regression tests.
+# Crossed-cylinder regression tests.
 !/tests/test_cylinder_validation.py
 !/tests/test_crossed_cylinders.py
 !/tests/test_structured_bfgs.py
-!/experiments/
-/experiments/*
-!/experiments/cylinder_validation_results/
-/experiments/cylinder_validation_results/*
-!/experiments/cylinder_validation_results/2026-10-31_130924/
 
-# Keep research reports local.
-/experiments/cylinder_validation_results/**/REPORT.md
+# Keep experiment outputs local.
+/experiments/
