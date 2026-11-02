@@ -13,25 +13,32 @@ from src.mechanics.condensation import condense_contact_problem  # ##r##
 from src.simulation.two_body import build_problem as build_two_body, solve
 
 
-# ##r## Both bodies are complete finite cylinders; the end disks are grips.
 def build_problem(n_angle=32,n_radial=1,n_axis=7,radius_lower=3.,radius_upper=5.,angle=45.,
                   half_length=3.,query_half_width=.4,patch_half_width=1.2,
                   initial_gap=.03,d_hat=None,d_hat_ratio=1e-3,R=.65,
                   young_lower=30.,young_upper=30.,poisson=.3,validation_delta=None,radial_grading=1.,
-                  local_size=None,local_half_width=.4,local_depth=.3):
+                  local_size=None,local_half_width=.4,local_depth=.3,cache_dir=None,cache_progress=None):
+    settings=locals().copy()
+    settings.pop('cache_dir');settings.pop('cache_progress')
+    settings.pop('validation_delta')  # checked below; does not change the mesh or K
+    from src.simulation.setup_cache import SetupCache
+    setup_cache=SetupCache(cache_dir,settings,cache_progress) if cache_dir is not None else None
+    cached_meshes=setup_cache.load('meshes') if setup_cache else None
     K,curvatures,directions=crossed_cylinder_curvature(radius_lower,radius_upper,angle)
     common=dict(half_length=half_length,n_angle=n_angle,n_radial=n_radial,n_axis=n_axis,
                 query_half_width=query_half_width,patch_half_width=patch_half_width,radial_grading=radial_grading)  # ##r##
-    lower=make_cylinder(radius_lower,facing='up',**common)
-    upper=make_cylinder(radius_upper,facing='down',angle_degrees=angle,clearance=initial_gap,**common)
-    # ##r## Same conforming local mesh used by the pressure-only diagnostic.
-    if local_size is not None:
-        from src.geometry.local_refinement import refine_cylinder_contact
-        lower,upper=[refine_cylinder_contact(m,local_size,local_half_width,local_depth)
-                     for m in (lower,upper)]
+    if cached_meshes is None:
+        lower=make_cylinder(radius_lower,facing='up',**common)
+        upper=make_cylinder(radius_upper,facing='down',angle_degrees=angle,clearance=initial_gap,**common)
+        if local_size is not None:
+            from src.geometry.mesh import refine_cylinder_contact
+            lower,upper=[refine_cylinder_contact(m,local_size,local_half_width,local_depth)
+                         for m in (lower,upper)]
+        if setup_cache:setup_cache.store('meshes',(lower,upper))
+    else:
+        lower,upper=cached_meshes
     automatic,length=size_based_activation_distance(np.vstack((lower['nodes'],upper['nodes'])),d_hat_ratio)
     activation=automatic if d_hat is None else d_hat
-    # ##r## Hertz benchmark guard, before FEM assembly. Not a general IPC rule.
     if validation_delta is not None:
         if not np.isfinite(validation_delta) or validation_delta<=0:
             raise ValueError('Hertz validation requires a positive finite indentation delta')
@@ -42,9 +49,12 @@ def build_problem(n_angle=32,n_radial=1,n_axis=7,radius_lower=3.,radius_upper=5.
                 'Use --d-hat or reduce --d-hat-ratio. Passing this check '
                 'does not establish Hertz accuracy; verify parameter convergence.'
                 % (activation,validation_delta,activation/validation_delta))
-    p=build_two_body(initial_gap=initial_gap,closure=0.,young_lower=young_lower,
+    cached_stiffness=setup_cache.load('stiffness') if setup_cache else None
+    p=build_two_body(preassembled_stiffness=cached_stiffness,initial_gap=initial_gap,closure=0.,young_lower=young_lower,
         young_upper=young_upper,R=R,d_hat=activation,sparse=True,contact_meshes=(lower,upper),
         closure_limit=initial_gap+.05*min(radius_lower,radius_upper),poisson=poisson)
+    if setup_cache and cached_stiffness is None:setup_cache.store('stiffness',p['stiffness'])
+    p['setup_cache']=setup_cache
     p.update(relative_curvature=K,principal_curvatures=curvatures,principal_directions=directions,
              initial_gap=initial_gap,characteristic_length=length,
              parameters=dict(n_angle=n_angle,n_radial=n_radial,n_axis=n_axis,radial_grading=radial_grading,
@@ -114,7 +124,7 @@ def closure_schedule(initial_gap, delta, d_hat, steps, contact_steps=None):
 
 
 def run(n_angle=32,n_radial=1,n_axis=7,steps=8,delta=.005,methods=('gn','sr1_gap'),collision='ipctk',
-        show=False,outdir=None,condense=True,linear_backend='pardiso',contact_steps=None,**kwargs):
+        show=False,outdir=None,condense=True,linear_backend='pardiso',contact_steps=None,cache_dir=None,**kwargs):
     if linear_backend not in ('superlu','pardiso'):
         raise ValueError('linear backend must be superlu or pardiso')
     closure_schedule(.03,delta,.0005,steps,contact_steps)  # validate before setup
@@ -127,14 +137,14 @@ def run(n_angle=32,n_radial=1,n_axis=7,steps=8,delta=.005,methods=('gn','sr1_gap
     rows=[];history={m:[] for m in methods};states={};previous_positions={}
     try:
         with threadpool_limits(1),ExitStack() as resources:
-            # ##r## Keep full geometry for diagnostics/CCD; solve retained coordinates.
             prep_tick=time.perf_counter()
             print('Preparing mesh, FEM stiffness and contact geometry...',flush=True)
-            original=build_problem(n_angle=n_angle,n_radial=n_radial,n_axis=n_axis,validation_delta=delta,**kwargs)
+            original=build_problem(n_angle=n_angle,n_radial=n_radial,n_axis=n_axis,validation_delta=delta,cache_dir=cache_dir,
+                cache_progress=lambda message:print(message,flush=True),**kwargs)
             assembly_s=time.perf_counter()-prep_tick
             print('Preparation %.2fs; full free DOFs=%d' % (assembly_s,len(original['initial'])),flush=True)
             if condense:
-                p=condense_contact_problem(original,linear_backend=linear_backend,
+                p=condense_contact_problem(original,linear_backend=linear_backend,setup_cache=original.get('setup_cache'),
                     progress=lambda message:print(message,flush=True))
                 for key in ('reference','meshes','parameters','initial_gap','characteristic_length',
                             'principal_curvatures','principal_directions','relative_curvature'):
@@ -144,7 +154,10 @@ def run(n_angle=32,n_radial=1,n_axis=7,steps=8,delta=.005,methods=('gn','sr1_gap
             else:
                 p=original
             timings=dict(preparation_s=assembly_s,condensation_s=p.get('condensation_s',0.),
-                         factorization_s=p.get('factorization_s',0.),schur_assembly_s=p.get('schur_assembly_s',0.))
+                         factorization_s=p.get('factorization_s',0.),schur_assembly_s=p.get('schur_assembly_s',0.),
+                         schur_cache_load_s=p.get('schur_cache_load_s',0.),
+                         setup_cache_key=original['setup_cache'].key if original.get('setup_cache') else None,
+                         setup_cache_hits=dict(original['setup_cache'].hits) if original.get('setup_cache') else {})
             # ##r## Disjoint phase timings; objective includes base + contact E/g/H.
             phases={}
             def measured(name,function):
@@ -158,7 +171,7 @@ def run(n_angle=32,n_radial=1,n_axis=7,steps=8,delta=.005,methods=('gn','sr1_gap
             from src.optimization.newton import newton_direction
             p['direction_solver']=measured('direction_s',p.get('direction_solver',newton_direction))
             total_closure=p['initial_gap']+delta
-            p['set_closure'](total_closure)  # validate before the load loop
+            p['set_closure'](total_closure)
             p['set_closure'](0.)
             collider=None
             if collision=='ipctk':
@@ -270,5 +283,8 @@ if __name__=='__main__':
     parser.add_argument('--local-depth',type=float,default=.3)
     parser.add_argument('--no-condense',dest='condense',action='store_false',
                         help='##r## use the slower full-DOF solver for comparison; default uses exact condensation')
+    # ##r## CLI reuses setup by default; library callers opt in explicitly.
+    parser.add_argument('--cache-dir',default=str(Path(__file__).resolve().parents[2]/'experiments'/'setup_cache'))
+    parser.add_argument('--no-cache',dest='cache_dir',action='store_const',const=None)
     parser.add_argument('--show',action='store_true');parser.add_argument('--outdir')
     args=vars(parser.parse_args());run(**args)

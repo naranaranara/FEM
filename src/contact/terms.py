@@ -98,13 +98,22 @@ def _gap_jacobian_blocks(gaps_autodiff, state, indices, gaps_subset_autodiff=Non
 
 
 def _gap_jacobian(gaps_autodiff, state, indices, gaps_subset_autodiff=None,
-                  sparse=False):
+                  sparse=False, gaps_jacobian=None):
     r"""접촉 야코비안의 실제 영 성분 비율에 맞춰 저장 방식을 선택해요.
 
     $$J_{ij}=\frac{\partial s_i}{\partial x_j}$$
     """
     from scipy.sparse import csr_matrix, vstack
     shape = (len(indices), state.numel())
+    # ##r## Exact analytic chain rule, supplied only by known geometry callbacks.
+    if gaps_jacobian is not None:
+        direct=gaps_jacobian(state.detach().numpy(),indices)
+        if direct is not None:
+            from scipy.sparse import issparse
+            if direct.shape!=shape:raise ValueError('direct gap Jacobian has invalid shape')
+            data=direct.data if issparse(direct) else direct
+            if not np.all(np.isfinite(data)):raise ValueError('nonfinite direct gap Jacobian')
+            return csr_matrix(direct) if sparse else (direct.toarray() if issparse(direct) else np.asarray(direct))
     dense = None if sparse else np.empty(shape)
     blocks = []
     offset = 0
@@ -193,7 +202,7 @@ def _sparse_gn_hessian(J, coefficient):
 def multiple_contact_terms(state, gaps_autodiff, weights, d_hat=0.2,
                            method='gn', filter_ratio=0.1, compute_hessian=True,
                            gaps_subset_autodiff=None, return_gap_data=False,
-                           _sparse_hessian=False, gaps_value_autodiff=None):
+                           _sparse_hessian=False, gaps_value_autodiff=None, gaps_jacobian=None):
     r"""접촉 에너지와 선택한 방식의 기울기 및 헤시안을 계산해요.
 
     $$E_c = \sum_i -w_i(s_i-\hat d)^2\log(s_i/\hat d)$$
@@ -251,7 +260,7 @@ def multiple_contact_terms(state, gaps_autodiff, weights, d_hat=0.2,
                      else _jacobian_rows(g, z, use_vmap=native_plan['used']).detach().numpy())
         else:
             J = _gap_jacobian(gaps_autodiff, z, indices, gaps_subset_autodiff,
-                              sparse=_sparse_hessian)
+                              sparse=_sparse_hessian,gaps_jacobian=gaps_jacobian)
             _, b1, coefficient = barrier_arrays(gaps[indices], d_hat)
             if np.any(active):
                 coefficient[active[indices]] = barrier_first_second(filter_ratio * d_hat, d_hat)[1]
@@ -278,7 +287,7 @@ def multiple_contact_terms(state, gaps_autodiff, weights, d_hat=0.2,
 def multiple_contact_terms_sparse(state, gaps_autodiff, weights, dofs, d_hat=.2,
                                   method='gn', compute_hessian=True,
                                   gaps_subset_autodiff=None, return_gap_data=False,
-                                  gaps_value_autodiff=None):
+                                  gaps_value_autodiff=None, gaps_jacobian=None):
     """접촉 자유도에서 계산한 미분을 전체 희소 행렬에 배치해요."""
     from scipy.sparse import csr_matrix
     state = np.asarray(state, dtype=float)
@@ -296,11 +305,17 @@ def multiple_contact_terms_sparse(state, gaps_autodiff, weights, dofs, d_hat=.2,
     def local_values(local):
         """미분 그래프가 필요 없는 전체 간격 검증을 국부 상태에 연결해요."""
         return gaps_value_autodiff(base.index_copy(0, ids, local))
+    def local_jacobian(local,query_ids):
+        # ##r## Map exact full-state derivatives into the selected contact DOFs.
+        full=state.copy();full[dofs]=local
+        result=gaps_jacobian(full,query_ids)
+        return None if result is None else result[:,dofs]
     c = multiple_contact_terms(state[dofs], local_gaps, weights, d_hat=d_hat,
                                method=method, compute_hessian=compute_hessian,
                                gaps_subset_autodiff=local_subset if gaps_subset_autodiff is not None else None,
                                return_gap_data=return_gap_data, _sparse_hessian=len(dofs) >= 128,
-                               gaps_value_autodiff=local_values if gaps_value_autodiff is not None else None)
+                               gaps_value_autodiff=local_values if gaps_value_autodiff is not None else None,
+                               gaps_jacobian=local_jacobian if gaps_jacobian is not None else None)
     gradient = np.zeros(len(state))
     gradient[dofs] = c['gradient']
     H = None

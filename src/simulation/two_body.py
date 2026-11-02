@@ -28,7 +28,7 @@ def _make_query_sampler(reference,faces):
         return (barycentric@nodes[faces_t]).reshape(-1,3)
     return sample,weights
 
-def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30.,R=1.5,d_hat=.2,nx=None,ny=None,nz=None,sparse=True,contact_meshes=None,closure_limit=None,poisson=.3):
+def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30.,R=1.5,d_hat=.2,nx=None,ny=None,nz=None,sparse=True,contact_meshes=None,closure_limit=None,poisson=.3,preassembled_stiffness=None):
     """두 물체의 표면 지지 영역과 질의면을 구분해 준정적 문제를 구성해요."""
     limit=initial_gap if closure_limit is None else closure_limit  # ##r## curved indentation may exceed initial clearance
     if not all(np.isfinite(v) for v in (initial_gap,d_hat,closure,limit)) or not 0<initial_gap or not 0<d_hat or not 0<=closure<limit:
@@ -51,13 +51,21 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
     references=[lower,upper];size=lower.size
     total_size=lower.size+upper.size  # ##r## independent body DOF counts
     reference=np.concatenate([a.ravel() for a in references])
-    stiffnesses=[assemble_stiffness(ref,m['tetrahedra'],young=E,poisson=poisson,sparse=sparse)
-                 for ref,m,E in zip(references,meshes,(young_lower,young_upper))]
-    if sparse:
-        from scipy.sparse import block_diag
-        K=block_diag(stiffnesses,format='csr')
+    # ##r## Reuse constant FEM stiffness from a validated setup cache.
+    if preassembled_stiffness is None:
+        stiffnesses=[assemble_stiffness(ref,m['tetrahedra'],young=E,poisson=poisson,sparse=sparse)
+                     for ref,m,E in zip(references,meshes,(young_lower,young_upper))]
+        if sparse:
+            from scipy.sparse import block_diag
+            K=block_diag(stiffnesses,format='csr')
+        else:
+            K=np.zeros((total_size,total_size));K[:size,:size]=stiffnesses[0];K[size:,size:]=stiffnesses[1]
     else:
-        K=np.zeros((total_size,total_size));K[:size,:size]=stiffnesses[0];K[size:,size:]=stiffnesses[1]
+        from scipy.sparse import issparse
+        K=preassembled_stiffness
+        values=K.data if issparse(K) else K
+        if K.shape!=(total_size,total_size) or issparse(K)!=sparse or not np.all(np.isfinite(values)):
+            raise ValueError("invalid preassembled stiffness")
     bottom=meshes[0].get('support_nodes',meshes[0]['bottom_nodes']);top=meshes[1].get('support_nodes',np.unique(meshes[1]['top_faces']))
     fixed=np.r_[(3*bottom[:,None]+np.arange(3)).ravel(),size+(3*top[:,None]+np.arange(3)).ravel()]
     free=np.setdiff1d(np.arange(total_size),fixed)
@@ -124,6 +132,20 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         return weights if selection['model'] is None else selection['model'].weights
     free_index = np.full(len(reference), -1, dtype=int)
     free_index[free] = np.arange(len(free))
+    # ##r## Lazy topology maps; coordinate/normal derivatives are always current.
+    direct_geometry=[None]
+    def gap_jacobian(state,indices,full=False):
+        if selection['model'] is not None:return None
+        # Small problems are cheaper on the existing autograd path.
+        if len(indices)<16 or len(indices)*max(3*len(lower_faces),3*len(upper_faces))<4096:return None
+        from src.geometry.rimls import TwoBodyGapJacobian
+        if direct_geometry[0] is None:
+            direct_geometry[0]=TwoBodyGapJacobian(references,[lower_faces,upper_faces],
+                                                [lower_query,upper_query],R)
+        a=np.asarray(state) if full else full_state(state)
+        nodes=(a[:size].reshape(-1,3),a[size:].reshape(-1,3))
+        mapping=np.arange(len(a)) if full else free_index
+        return direct_geometry[0].evaluate(nodes,indices,mapping,len(state))
     dof_cache = {'ids': surface_dofs, 'local': contact_dofs}
     def current_dofs(full=False):
         ids=surface_dofs if selection['model'] is None else selection['model'].contact_dofs
@@ -144,8 +166,8 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
                 empty.update(gap_indices=np.empty(0,dtype=int),gap_jacobian=np.empty((0,0)),
                              gap_weights=np.empty(0),gap_dofs=np.empty(0,dtype=int))
             return empty
-        return (multiple_contact_terms_sparse(state,gap_function,w,current_dofs(full),d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function)
-                if sparse else multiple_contact_terms(state,gap_function,w,d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function))
+        return (multiple_contact_terms_sparse(state,gap_function,w,current_dofs(full),d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function,gaps_jacobian=lambda x,ids:gap_jacobian(x,ids,full))
+                if sparse else multiple_contact_terms(state,gap_function,w,d_hat=d_hat,method=method,compute_hessian=compute_hessian,gaps_subset_autodiff=gap_function,return_gap_data=return_gap_data,gaps_value_autodiff=gap_function,gaps_jacobian=lambda x,ids:gap_jacobian(x,ids,full)))
     ##r## Stable query/target keys and complete geometric supports for SR1.
     layout_cache={'identity':None}
     def contact_layout():
@@ -223,7 +245,7 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
     problem.update(dict(set_closure=set_closure,attach_auto_contact=attach_auto_contact,stiffness=K,stiffness_free=Kf,sparse=sparse,contact_dofs=contact_dofs,mesh_counts=counts,initial=prescribed[free].copy(),reference=references,reference_flat=reference,meshes=meshes,
         full_state=full_state,unpack=unpack,gaps_ad=gaps_ad,gaps_full_ad=gaps_full_ad,base=base,
         feasible=feasible,energy=energy,objective=objective,diagnostics=diagnostics,
-        contact=contact,contact_layout=contact_layout,  # ##r## reusable multi-gap data
+        contact=contact,contact_layout=contact_layout,gap_jacobian=gap_jacobian,  # ##r## reusable multi-gap data
         free=free,fixed=fixed,size=size,body_node_counts=(len(lower),len(upper)),weights=weights,prescribed=prescribed,closure=closure,d_hat=d_hat))
     # 원래 함수의 동일성을 보관해 사용자 콜백으로 바뀌면 값 전용 최적화를 해제해요.
     problem['_no_grad_gaps_ad']=gaps_ad

@@ -1,5 +1,6 @@
 """삼각형 표면의 적분점과 면적 가중치 및 미분 가능한 법선을 계산해요."""
 import numpy as np
+from scipy.sparse import coo_matrix, eye, kron
 
 
 def bottom_faces(mesh):
@@ -94,3 +95,71 @@ def surface_lumped_weights(nodes, faces):
     # 각 면의 면적을 절점에 모아요: $$w_i=\sum_{f\ni i}A_f/3$$
     np.add.at(weights, faces.ravel(), np.repeat(areas / 3., 3))
     return weights
+
+
+# ##r## Exact sparse derivatives of the surface sampler above.
+def skew(v):
+    result=np.zeros(v.shape[:-1]+(3,3))
+    result[...,0,1]=-v[...,2];result[...,0,2]=v[...,1]
+    result[...,1,0]=v[...,2];result[...,1,2]=-v[...,0]
+    result[...,2,0]=-v[...,1];result[...,2,1]=v[...,0]
+    return result
+
+
+def block_diagonal3(blocks):
+    count=len(blocks);base=3*np.arange(count)[:,None,None]
+    rows=np.broadcast_to(base+np.arange(3)[None,:,None],blocks.shape)
+    columns=np.broadcast_to(base+np.arange(3)[None,None,:],blocks.shape)
+    return coo_matrix((blocks.ravel(),(rows.ravel(),columns.ravel())),
+                      shape=(3*count,3*count)).tocsr()
+
+
+def normalized(v):
+    length=np.linalg.norm(v,axis=1)
+    if np.any(length<=0) or np.any(~np.isfinite(length)):
+        raise ValueError('collapsed or nonfinite surface normals')
+    unit=v/length[:,None]
+    derivative=(np.eye(3)[None,:,:]-unit[:,:,None]*unit[:,None,:])/length[:,None,None]
+    return unit,block_diagonal3(derivative)
+
+
+class PointMap:
+    def __init__(self,reference,faces):
+        self.used=np.unique(faces)
+        remap=np.full(len(reference),-1,dtype=int);remap[self.used]=np.arange(len(self.used))
+        self.faces=remap[np.asarray(faces,dtype=int)]
+        S,_=surface_quadrature(np.asarray(reference)[self.used],self.faces,sparse=True)
+        self.position_jacobian=kron(S,eye(3,format='csr'),format='csr')
+        self.barycentric=np.array([[2/3,1/6,1/6],[1/6,2/3,1/6],[1/6,1/6,2/3]])
+        self.dofs=(3*self.used[:,None]+np.arange(3)).ravel()
+
+    def positions(self,nodes):
+        return (self.barycentric@np.asarray(nodes)[self.used][self.faces]).reshape(-1,3)
+
+
+class SurfaceMap(PointMap):
+    def __init__(self,reference,faces):
+        super().__init__(reference,faces)
+        face_ids=np.repeat(np.arange(len(self.faces)),3)
+        incidence=coo_matrix((np.ones(len(face_ids)),(self.faces.ravel(),face_ids)),
+                             shape=(len(self.used),len(self.faces))).tocsr()
+        self.incidence=kron(incidence,eye(3,format='csr'),format='csr')
+
+    def linearize(self,nodes):
+        surface=np.asarray(nodes)[self.used];xyz=surface[self.faces]
+        area=np.cross(xyz[:,1]-xyz[:,0],xyz[:,2]-xyz[:,0])
+        raw=np.zeros_like(surface)
+        for corner in range(3):np.add.at(raw,self.faces[:,corner],area)
+        vn,Nv=normalized(raw)
+        interpolated=(self.barycentric@vn[self.faces]).reshape(-1,3)
+        normals,Ns=normalized(interpolated)
+        blocks=np.stack((skew(xyz[:,2]-xyz[:,1]),-skew(xyz[:,2]-xyz[:,0]),
+                         skew(xyz[:,1]-xyz[:,0])),axis=1)
+        rows=np.broadcast_to(3*np.arange(len(xyz))[:,None,None,None]+np.arange(3)[None,None,:,None],blocks.shape)
+        columns=np.broadcast_to(3*self.faces[:,:,None,None]+np.arange(3)[None,None,None,:],blocks.shape)
+        face_jacobian=coo_matrix((blocks.ravel(),(rows.ravel(),columns.ravel())),
+            shape=(3*len(xyz),3*len(surface))).tocsr()
+        vertex_jacobian=Nv@(self.incidence@face_jacobian)
+        normal_jacobian=Ns@(self.position_jacobian@vertex_jacobian)
+        points=(self.barycentric@xyz).reshape(-1,3)
+        return points,normals,normal_jacobian.tocsr()

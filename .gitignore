@@ -53,3 +53,6 @@ dist/
 !/tests/test_local_refined_contact.py
 !/tests/test_local_rimls.py
 !/tests/test_pardiso_condensation.py
+!/tests/test_setup_cache.py
+!/tests/test_gap_distance.py
+!/tests/test_direct_jacobian.py

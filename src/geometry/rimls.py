@@ -1,8 +1,14 @@
 """RIMLS 간격과 미분을 계산하고 선택 질의의 역전파를 묶음 처리해요."""
 import numpy as np
 import torch
+from contextlib import contextmanager
+from contextvars import ContextVar
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.spatial import cKDTree
+from . import native_rimls
+from .surface import PointMap, SurfaceMap
 from .primitives import sample_plane
-from .native_rimls import try_native_rimls, try_native_values
+from .native_rimls import try_native_rimls, try_native_values, try_local_rimls
 
 def imls_value_gradient_torch(query, points, normals, R):
     import torch
@@ -208,7 +214,6 @@ def rimls_values_torch(queries, points, normals, R, sigma_r=.5, sigma_n=.5):
     if R <= 0 or sigma_r <= 0 or sigma_n <= 0:
         raise ValueError('positive R and robust scales required')
     # ##r## Radius neighbours + cached native first derivatives for GN.
-    from .local_rimls import try_local_rimls
     local = try_local_rimls(queries, points, normals, R, sigma_r, sigma_n)
     if local is not None:
         return local
@@ -256,3 +261,86 @@ def make_gaps(S, node_shape, R=.9, points=None, normals=None):
         samples = St @ state.reshape(node_shape)
         return rimls_values_torch(samples, pt, nt, R, sigma_n=.5)  ##r##
     return gaps
+
+
+# ##r## Exact gap-to-node Jacobian using the same RIMLS and surface formulas.
+_direct_jacobian_enabled=ContextVar('direct_contact_jacobian',default=True)
+
+
+@contextmanager
+def direct_jacobian_mode(enabled=True):
+    token=_direct_jacobian_enabled.set(enabled)
+    try:yield
+    finally:_direct_jacobian_enabled.reset(token)
+
+
+def _component_matrix(coefficients,rows,point_ids,query_count,point_count):
+    columns=3*point_ids[:,None]+np.arange(3)
+    rr=np.broadcast_to(rows[:,None],coefficients.shape)
+    return coo_matrix((coefficients.ravel(),(rr.ravel(),columns.ravel())),
+                      shape=(query_count,3*point_count)).tocsr()
+
+
+class TwoBodyGapJacobian:
+    def __init__(self,reference,surface_faces,query_faces,R):
+        self.surfaces=[SurfaceMap(ref,faces) for ref,faces in zip(reference,surface_faces)]
+        self.queries=[PointMap(ref,faces) for ref,faces in zip(reference,query_faces)]
+        self.query_counts=[3*len(faces) for faces in query_faces]
+        self.offsets=np.r_[0,np.cumsum([np.asarray(ref).size for ref in reference])]
+        self.R=R
+
+    def evaluate(self,nodes,indices,dof_map,dimension):
+        native=native_rimls._rimls_native
+        if not _direct_jacobian_enabled.get() or native is None or not hasattr(native,'local_evaluate'):
+            return None
+        indices=np.asarray(indices,dtype=int)
+        if indices.ndim!=1 or np.any(indices<0) or np.any(indices>=sum(self.query_counts)):
+            raise ValueError('invalid selected gap indices')
+        if not len(indices):return csr_matrix((0,dimension))
+        # Ordering matches two_body: upper queries vs lower, then lower vs upper.
+        split=self.query_counts[1]
+        row_parts=[];column_parts=[];data_parts=[]
+        def scatter(block,source_dofs,slots):
+            block=block.tocoo();columns=dof_map[source_dofs[block.col]]
+            keep=columns>=0
+            row_parts.append(slots[block.row[keep]])
+            column_parts.append(columns[keep]);data_parts.append(block.data[keep])
+        for target,source in ((0,1),(1,0)):
+            slots=np.flatnonzero(indices<split) if target==0 else np.flatnonzero(indices>=split)
+            if not len(slots):continue
+            selected=indices[slots] if target==0 else indices[slots]-split
+            target_map=self.surfaces[target];query_map=self.queries[source]
+            p,n,Jn=target_map.linearize(nodes[target])
+            q=query_map.positions(nodes[source])[selected]
+            tree=cKDTree(p)
+            for start in range(0,len(q),128):
+                query=np.ascontiguousarray(q[start:start+128])
+                neighbours=tree.query_ball_point(query,np.nextafter(float(self.R),np.inf),
+                                                  eps=0.,workers=1,return_sorted=True)
+                counts=np.fromiter(map(len,neighbours),dtype=np.int64,count=len(query))
+                offsets=np.r_[np.int64(0),np.cumsum(counts)]
+                ids=np.concatenate(neighbours).astype(np.int64) if offsets[-1] else np.empty(0,dtype=np.int64)
+                rows=np.repeat(np.arange(len(query)),counts)
+                A=np.empty((len(ids),3));B=np.empty_like(A);values=np.empty(len(query))
+                try:
+                    native.local_evaluate(query,np.ascontiguousarray(p),np.ascontiguousarray(n),
+                        offsets,ids,values,A,B,float(self.R),.5,.5)
+                except ValueError:
+                    return None  # preserve threshold decisions of the reference path
+                if not all(np.isfinite(a).all() for a in (values,A,B)):
+                    return None
+                Jtarget=(-_component_matrix(A,rows,ids,len(query),len(p))@target_map.position_jacobian
+                         +_component_matrix(B,rows,ids,len(query),len(p))@Jn)
+                total=np.column_stack([np.bincount(rows,weights=A[:,k],minlength=len(query)) for k in range(3)])
+                local=np.arange(len(query))
+                Jq=_component_matrix(total,local,local,len(query),len(query))
+                query_ids=(3*selected[start:start+len(query),None]+np.arange(3)).ravel()
+                Jsource=Jq@query_map.position_jacobian[query_ids]
+                out_rows=slots[start:start+len(query)]
+                scatter(Jtarget,target_map.dofs+self.offsets[target],out_rows)
+                scatter(Jsource,query_map.dofs+self.offsets[source],out_rows)
+        J=coo_matrix((np.concatenate(data_parts),(np.concatenate(row_parts),np.concatenate(column_parts))),
+                     shape=(len(indices),dimension)).tocsr()
+        J.sum_duplicates();J.eliminate_zeros()
+        if not np.all(np.isfinite(J.data)):raise ValueError('nonfinite direct gap Jacobian')
+        return J

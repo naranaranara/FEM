@@ -152,7 +152,7 @@ def run(n_angle=128, n_axis=25, n_radial=1, delta=.005, outdir=None, radial_grad
                                  angle_degrees=angle, clearance=clearance)
             # ##r## Refine only the contact neighbourhood, preserving geometry.
             if local_size is not None:
-                from src.geometry.local_refinement import refine_cylinder_contact
+                from src.geometry.mesh import refine_cylinder_contact
                 mesh = refine_cylinder_contact(mesh, local_size, local_half_width, local_depth,
                     progress=lambda msg: print('  '+msg, flush=True))
                 print('  refined nodes=%d tetrahedra=%d' %

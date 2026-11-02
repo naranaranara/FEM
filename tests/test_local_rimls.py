@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from src.geometry.rimls import rimls_values_torch, _rimls_values_reference
-from src.geometry.local_rimls import local_rimls_mode
+from src.geometry.native_rimls import local_rimls_mode
 from src.geometry import native_rimls
 
 

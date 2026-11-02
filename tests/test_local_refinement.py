@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 from src.geometry.mesh import make_cylinder
-from src.geometry.local_refinement import refine_cylinder_contact
+from src.geometry.mesh import refine_cylinder_contact
 from src.mechanics.solid import tetrahedron_volumes
 
 

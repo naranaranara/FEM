@@ -61,6 +61,22 @@ def reference_stiffness(nodes, tetrahedra, young, poisson):
 class MechanicsEquivalenceChecks(unittest.TestCase):
     """배열화 전후의 연결 순서와 물리적 성질을 검사해요."""
 
+    # ##r## Fast trial-volume evaluation must preserve inversion decisions.
+    def test_fast_volumes_preserve_signed_and_nearly_flat_elements(self):
+        rng=np.random.default_rng(349)
+        xyz=rng.normal(size=(200,4,3))
+        xyz[0,3]=xyz[0,0]
+        xyz[1,3]=xyz[1,0]+1e-16*(xyz[1,3]-xyz[1,0])
+        xyz[2]=np.array([[0.,0.,0.],[1.,0.,0.],[0.,1.,0.],[.2,.3,1e-18]])
+        nodes=xyz.reshape(-1,3);tets=np.arange(len(nodes)).reshape(-1,4)
+        expected=np.linalg.det(xyz[:,1:]-xyz[:,:1])/6
+        actual=tetrahedron_volumes(nodes,tets)
+        np.testing.assert_allclose(actual,expected,rtol=5e-13,atol=1e-15)
+        np.testing.assert_array_equal(np.sign(actual),np.sign(expected))
+        np.testing.assert_array_equal(actual[:3],expected[:3])
+        inverted=tets[:,[0,2,1,3]]
+        np.testing.assert_allclose(tetrahedron_volumes(nodes,inverted),-expected,rtol=5e-13,atol=1e-15)
+
     def test_topology_order_and_outward_normals(self):
         """직육면체 격자의 연결과 경계면 순서가 정확히 같은지 검사해요."""
         for nx, ny, nz in ((2, 2, 2), (3, 4, 2), (4, 2, 3)):

@@ -116,6 +116,13 @@ def tetrahedron_volumes(nodes, tetrahedra):
 
     $$V_e=\det([\boldsymbol{x}_1-\boldsymbol{x}_0,\boldsymbol{x}_2-\boldsymbol{x}_0,\boldsymbol{x}_3-\boldsymbol{x}_0])/6$$
     """
-    xyz = nodes[tetrahedra]
+    xyz = np.asarray(nodes,dtype=float)[tetrahedra]
     # 모서리 행렬의 행렬식에서 부피를 구해요: $$V_e=\det(X_{e,1:}-X_{e,0})/6$$
-    return np.linalg.det(xyz[:, 1:] - xyz[:, :1]) / 6
+    # ##r## Triple products avoid a batched LU factorization for every trial.
+    edges=xyz[:,1:]-xyz[:,:1]
+    determinant=np.einsum('ij,ij->i',edges[:,0],np.cross(edges[:,1],edges[:,2]))
+    # Preserve the determinant path for cancellation-prone, nearly flat elements.
+    scale=np.max(np.abs(edges),axis=(1,2))
+    uncertain=np.abs(determinant)<=32*np.finfo(float).eps*scale**3
+    if np.any(uncertain):determinant[uncertain]=np.linalg.det(edges[uncertain])
+    return determinant/6

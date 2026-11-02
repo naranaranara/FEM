@@ -104,5 +104,80 @@ class CondensedCurvatureChecks(unittest.TestCase):
         self.assertEqual(subclass.calls,3)
 
 
+    # ##r## Cache invalidation and ownership regressions.
+    def test_constant_factor_reuse_and_changed_contact_matrix(self):
+        from unittest.mock import patch
+        from src.mechanics import condensation
+        p=condense_contact_problem(build_problem(n=2,d_hat=.01))
+        self.addCleanup(p['close'])
+        q=p['initial'].copy()
+        _,g,H,_=p['objective'](q,'gn')
+        self.assertIs(H,p['stiffness_free'])
+        rhs=np.arange(len(g),dtype=float)+1
+        with patch.object(condensation,'cho_factor',wraps=condensation.cho_factor) as tracked:
+            for closure in (.04,.05):
+                p['set_closure'](closure)
+                actual,_=p['direction_solver'](H,rhs)
+                np.testing.assert_allclose(H@actual,-rhs,rtol=1e-10,atol=1e-10)
+            self.assertEqual(tracked.call_count,1)
+            changed=H+np.eye(len(H))
+            actual,_=p['direction_solver'](changed,rhs)
+            np.testing.assert_allclose(changed@actual,-rhs,rtol=1e-10,atol=1e-10)
+            self.assertEqual(tracked.call_count,2)
+
+    def test_expansion_cache_load_invalidation_and_array_ownership(self):
+        from unittest.mock import patch
+        from src.mechanics import condensation
+        original_factor=condensation.factorize_sparse
+        calls=[]
+        def tracked(*args):
+            factor=original_factor(*args)
+            class Proxy:
+                def solve(self,rhs):
+                    calls.append(1)
+                    return factor.solve(rhs)
+            return Proxy()
+        with patch.object(condensation,'factorize_sparse',side_effect=tracked):
+            p=condense_contact_problem(build_problem(n=3))
+        self.addCleanup(p['close'])
+        q=p['initial'].copy();calls.clear()
+        x=p['expand'](q);expected=x.copy()
+        x[:]=100
+        np.testing.assert_array_equal(p['expand'](q),expected)
+        self.assertEqual(len(calls),1)
+        q[0]+=.001
+        self.assertFalse(np.array_equal(p['expand'](q),expected))
+        self.assertEqual(len(calls),2)
+        p['set_closure'](.05);calls.clear()
+        p['expand'](q)
+        self.assertEqual(len(calls),1)
+
+    def test_gap_value_cache_load_change_and_exact_derivatives(self):
+        original=build_problem(n=3)
+        callback=original['gaps_ad']
+        calls=[]
+        def counted(*args,**kwargs):
+            calls.append(1)
+            return callback(*args,**kwargs)
+        original['gaps_ad']=original['_no_grad_gaps_ad']=counted
+        p=condense_contact_problem(original)
+        self.addCleanup(p['close'])
+        q=p['initial'].copy()
+        first=p['energy'](q);count=len(calls)
+        self.assertEqual(p['energy'](q),first)
+        self.assertEqual(len(calls),count)
+        g=p['base'](q)[1];g[:]=123
+        self.assertFalse(np.all(p['base'](q)[1]==123))
+        p['set_closure'](.05)
+        self.assertNotEqual(p['energy'](q),first)
+        self.assertGreater(len(calls),count)
+        z=torch.tensor(q,dtype=torch.float64,requires_grad=True)
+        self.assertTrue(p['gaps_ad'](z).requires_grad)
+        E,gradient,H,_=p['objective'](q,'gn')
+        self.assertAlmostEqual(E,p['energy'](q),places=12)
+        self.assertTrue(np.all(np.isfinite(gradient)))
+        self.assertTrue(np.all(np.isfinite(H)))
+
+
 if __name__=='__main__':
     unittest.main()
