@@ -81,7 +81,7 @@ def make_spherical_cap(radius=10., half_width=6., height=10., nxy=17, nz=9,
 
 def make_cylinder(radius=3., half_length=3., n_angle=32, n_radial=1, n_axis=7,
                   facing='up', angle_degrees=0., clearance=0.,
-                  query_half_width=.4, patch_half_width=1.2):
+                  query_half_width=.4, patch_half_width=1.2, radial_grading=1.):
     r"""완전한 원통을 일정한 순서의 사면체와 바깥 방향 경계면으로 나눠요.
 
     $$\boldsymbol{x}_{kij}=R_z(\alpha)(r_i\sin\theta_j,\ y_k,\ z_c+\sigma r_i\cos\theta_j)^T$$
@@ -100,6 +100,9 @@ def make_cylinder(radius=3., half_length=3., n_angle=32, n_radial=1, n_axis=7,
         raise ValueError('n_radial must be an integer >= 1')
     if not isinstance(n_axis,(int,np.integer)) or n_axis<7 or n_axis%2!=1:
         raise ValueError('n_axis must be odd and >= 7')
+    # ##r## Preserve the local surface-concentrated radial mesh option.
+    if not np.isfinite(radial_grading) or not 1 <= radial_grading <= 6:
+        raise ValueError("radial_grading must be finite and in [1,6]")
     m=n_angle//4
     # 사분면 안의 균등 매개변수를 계산해요: $$t_j=j/m$$
     t=np.arange(m)/m
@@ -108,7 +111,9 @@ def make_cylinder(radius=3., half_length=3., n_angle=32, n_radial=1, n_axis=7,
     disk=[(0.,0.)]
     for ring in range(1,n_radial+1):
         # 내부 원환의 반지름을 계산해요: $$r_i=Ri/n_r$$
-        r=radius*ring/n_radial
+        # ##r## Default uniform rings retain the original coordinates.
+        r=(radius*ring/n_radial if radial_grading == 1 else
+           radius*(1-(1-ring/n_radial)**radial_grading))
         # 원판의 수평 좌표를 계산해요: $$x_{ij}=r_i\sin\theta_j$$
         disk_x=r*np.sin(theta)
         # 원판의 수직 좌표를 계산해요: $$z_{ij}=r_i\cos\theta_j$$
@@ -178,6 +183,7 @@ def make_cylinder(radius=3., half_length=3., n_angle=32, n_radial=1, n_axis=7,
     return dict(nodes=nodes,tetrahedra=tets,boundary_faces=boundary,
                 contact_faces=contact,query_faces=query,support_nodes=ends,
                 bottom_nodes=np.arange(width),top_faces=boundary[np.all(np.isclose(local[boundary,1],half_length),axis=1)],
-                counts=(n_angle,n_radial,n_axis),radius=radius,half_length=half_length,
+                counts=(n_angle,n_radial,n_axis),radial_grading=float(radial_grading),
+                radius=radius,half_length=half_length,
                 facing=facing,angle_degrees=angle_degrees,local_nodes=local,
                 side_faces=side,end_faces=boundary[end_mask],axis_nodes=axis)

@@ -110,7 +110,8 @@ class SelectedRIMLSChecks(unittest.TestCase):
             sizes.append(len(q))
             return original(q, *args)
 
-        with patch.object(rimls, 'try_native_values', return_value=None), patch.object(
+        from src.geometry.local_rimls import local_rimls_mode  # ##r## legacy chunk path only
+        with local_rimls_mode(False), patch.object(rimls, 'try_native_values', return_value=None), patch.object(
                 rimls, '_rimls_values_reference', side_effect=counted):
             actual = rimls.rimls_values_torch(queries, points, normals, 1.5)
             with torch.no_grad():

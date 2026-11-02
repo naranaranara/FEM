@@ -207,6 +207,11 @@ def rimls_values_torch(queries, points, normals, R, sigma_r=.5, sigma_n=.5):
     """
     if R <= 0 or sigma_r <= 0 or sigma_n <= 0:
         raise ValueError('positive R and robust scales required')
+    # ##r## Radius neighbours + cached native first derivatives for GN.
+    from .local_rimls import try_local_rimls
+    local = try_local_rimls(queries, points, normals, R, sigma_r, sigma_n)
+    if local is not None:
+        return local
     native = try_native_rimls(queries, points, normals, R, sigma_r, sigma_n)
     if native is not None:
         return native

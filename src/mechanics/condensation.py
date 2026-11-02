@@ -2,7 +2,7 @@
 import time
 import numpy as np
 import torch
-from scipy.sparse.linalg import splu
+from src.mechanics.sparse_factor import factorize_sparse  # ##r##
 from scipy.linalg import cho_factor,cho_solve
 from src.contact.terms import multiple_contact_terms
 from src.contact.barrier import barrier_value
@@ -21,13 +21,15 @@ def cholesky_direction(H,g,eigen_floor=1e-7):
     return p,shift
 
 
-def condense_contact_problem(problem,batch=32):
+def condense_contact_problem(problem,batch=32,progress=None,linear_backend='superlu'):
     r"""접촉 자유도를 남기고 내부 선형 탄성 자유도를 정확히 제거해요.
 
     $$S=K_{cc}-K_{ci}K_{ii}^{-1}K_{ic}$$
     """
     if not problem['sparse'] or problem.get('prepare') is not None:
         raise ValueError('condensation currently requires fixed contact patches and sparse constant FEM')
+    if linear_backend not in ('superlu','pardiso'):
+        raise ValueError('linear backend must be superlu or pardiso')
     tick=time.perf_counter()
     K=problem['stiffness_free'].tocsr();n=K.shape[0]
     retained=np.asarray(problem['contact_dofs'],dtype=int)
@@ -37,12 +39,22 @@ def condense_contact_problem(problem,batch=32):
     S=K[retained][:,retained].toarray()
     Kic=K[interior][:,retained].tocsc()
     Kci=Kic.T.tocsr()
-    factor=splu(K[interior][:,interior].tocsc()) if len(interior) else None
+    # ##r## Report expensive setup separately from nonlinear iterations.
+    if progress:progress('interior factorization: %d DOFs, backend=%s' % (len(interior),linear_backend))
+    factor_tick=time.perf_counter()
+    factor=factorize_sparse(K[interior][:,interior],linear_backend) if len(interior) else None
+    factor_s=time.perf_counter()-factor_tick
+    if progress:progress('interior factorization complete: %.2fs; Schur columns=%d' % (factor_s,len(retained)))
+    schur_tick=time.perf_counter();last_report=schur_tick
     if factor is not None:
         for start in range(0,len(retained),batch):
             stop=min(start+batch,len(retained))
             # 열 묶음별로 내부 자유도의 영향을 제거해요: $$S_{:,b}\leftarrow S_{:,b}-K_{ci}K_{ii}^{-1}K_{ic,:,b}$$
             S[:,start:stop]-=Kci@factor.solve(Kic[:,start:stop].toarray())
+            if progress and (time.perf_counter()-last_report>=10 or stop==len(retained)):
+                progress('Schur columns %d/%d, %.2fs' % (stop,len(retained),time.perf_counter()-schur_tick))
+                last_report=time.perf_counter()
+    schur_s=time.perf_counter()-schur_tick
     # 부동소수점 비대칭을 제거할 분자를 모아요: $$S\leftarrow S+S^T$$
     np.add(S,S.T,out=S)
     # 기존 축약 행렬과 같은 대칭화 계수를 적용해요: $$S\leftarrow S/2$$
@@ -113,5 +125,7 @@ def condense_contact_problem(problem,batch=32):
         feasible=feasible,gaps_ad=gaps_ad,diagnostics=lambda q:problem['diagnostics'](expand(q)),
         set_closure=set_closure,closure=problem['closure'],direction_solver=cholesky_direction,
         d_hat=problem['d_hat'],weights=problem['weights'],retained=retained,
-        original=problem,stiffness_free=S,condensation_s=time.perf_counter()-tick)
+        original=problem,stiffness_free=S,condensation_s=time.perf_counter()-tick,
+        factorization_s=factor_s,schur_assembly_s=schur_s,linear_backend=linear_backend,
+        close=getattr(factor,'close',lambda:None))
     return result

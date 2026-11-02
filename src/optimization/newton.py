@@ -40,7 +40,10 @@ def minimize_static(initial,objective,energy,max_iter=300,tol=1e-8,eigen_floor=1
         if residual<tol:status='converged';break
         try:
             direction,shift=(newton_direction if direction_solver is None else direction_solver)(H,g,eigen_floor)
-        except np.linalg.LinAlgError:status='linear_failure';break
+        except np.linalg.LinAlgError as exc:
+            # ##r## Preserve the actual failure rather than only its category.
+            rec['linear_error']=str(exc)
+            status='linear_failure';break
         rec['regularization']=float(shift)
         alpha=1.;slope=float(g @ direction)
         if max_step is not None:

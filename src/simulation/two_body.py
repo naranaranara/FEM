@@ -38,8 +38,9 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
     counts=tuple(default if value is None else value for value,default in zip((nx,ny,nz),defaults))
     meshes=([make_block(width=1.,depth=1.,height=.4,nx=counts[0],ny=counts[1],nz=counts[2]) for _ in range(2)]
             if contact_meshes is None else list(contact_meshes))
-    if len(meshes)!=2 or meshes[0]['nodes'].shape!=meshes[1]['nodes'].shape:
-        raise ValueError('two meshes with matching node counts required')
+    # ##r## Locally refined bodies may have different node counts.
+    if len(meshes)!=2 or any(np.asarray(m['nodes']).ndim!=2 or np.asarray(m['nodes']).shape[1]!=3 for m in meshes):
+        raise ValueError('two meshes with (N,3) nodes required')
     lower=meshes[0]['nodes'].copy();upper=meshes[1]['nodes'].copy()
     if contact_meshes is None:upper[:,2]+=.4+initial_gap
     else:counts=tuple(meshes[0].get('counts',counts))
@@ -48,6 +49,7 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
     lower_query=meshes[0].get('query_faces',lower_faces)  # ##r## full cylinders keep a wider normal-support patch
     upper_query=meshes[1].get('query_faces',upper_faces)
     references=[lower,upper];size=lower.size
+    total_size=lower.size+upper.size  # ##r## independent body DOF counts
     reference=np.concatenate([a.ravel() for a in references])
     stiffnesses=[assemble_stiffness(ref,m['tetrahedra'],young=E,poisson=poisson,sparse=sparse)
                  for ref,m,E in zip(references,meshes,(young_lower,young_upper))]
@@ -55,10 +57,10 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         from scipy.sparse import block_diag
         K=block_diag(stiffnesses,format='csr')
     else:
-        K=np.zeros((2*size,2*size));K[:size,:size]=stiffnesses[0];K[size:,size:]=stiffnesses[1]
+        K=np.zeros((total_size,total_size));K[:size,:size]=stiffnesses[0];K[size:,size:]=stiffnesses[1]
     bottom=meshes[0].get('support_nodes',meshes[0]['bottom_nodes']);top=meshes[1].get('support_nodes',np.unique(meshes[1]['top_faces']))
     fixed=np.r_[(3*bottom[:,None]+np.arange(3)).ravel(),size+(3*top[:,None]+np.arange(3)).ravel()]
-    free=np.setdiff1d(np.arange(2*size),fixed)
+    free=np.setdiff1d(np.arange(total_size),fixed)
     Kf=K[free][:,free] if sparse else K[np.ix_(free,free)]  # ##r## slice once
     lower_surface=np.unique(lower_faces);upper_surface=np.unique(upper_faces)
     surface_dofs=np.r_[(3*lower_surface[:,None]+np.arange(3)).ravel(),
@@ -222,7 +224,7 @@ def build_problem(n=2,initial_gap=.12,closure=.04,young_lower=30.,young_upper=30
         full_state=full_state,unpack=unpack,gaps_ad=gaps_ad,gaps_full_ad=gaps_full_ad,base=base,
         feasible=feasible,energy=energy,objective=objective,diagnostics=diagnostics,
         contact=contact,contact_layout=contact_layout,  # ##r## reusable multi-gap data
-        free=free,fixed=fixed,size=size,weights=weights,prescribed=prescribed,closure=closure,d_hat=d_hat))
+        free=free,fixed=fixed,size=size,body_node_counts=(len(lower),len(upper)),weights=weights,prescribed=prescribed,closure=closure,d_hat=d_hat))
     # 원래 함수의 동일성을 보관해 사용자 콜백으로 바뀌면 값 전용 최적화를 해제해요.
     problem['_no_grad_gaps_ad']=gaps_ad
     return problem

@@ -46,3 +46,10 @@ dist/
 
 # Keep experiment outputs local.
 /experiments/
+
+# Local refinement and native GN regression tests.
+!/tests/test_cylinder_compliance.py
+!/tests/test_local_refinement.py
+!/tests/test_local_refined_contact.py
+!/tests/test_local_rimls.py
+!/tests/test_pardiso_condensation.py

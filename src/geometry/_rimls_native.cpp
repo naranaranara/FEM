@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstdint>  // ##r## CSR neighbour indices
 
 namespace {
 struct Dual {
@@ -215,7 +216,7 @@ template<class T> void evaluate(const double* queries,const double* points,const
         if(primal(Z)<=1e-14)throw std::runtime_error("vanishing robust weights");
         // 강건 거리장을 구해요: $$s=N/Z$$
         T value=N/Z;
-        if(out_values){out_values[i]=primal(value);continue;}
+        if(out_values){out_values[i]=primal(value);if(!pair_A)continue;} // ##r## fused value + first derivatives
         T bar_f=0.;Vec<T> bar_h{};
         if(outg)for(int r=0;r<lanes;++r)outg[r*Q+i]=DerivativeLanes<T>::get(value,r);
         for(auto& pair:cache) {
@@ -485,9 +486,85 @@ PyObject* values(PyObject*,PyObject* args) {
     if(!error.empty()){PyErr_SetString(PyExc_ValueError,error.c_str());return nullptr;}
     Py_RETURN_NONE;
 }
+
+// ##r## Compact CSR neighbourhoods: evaluate each actual query/sample pair once.
+struct IndexBuffer {
+    Py_buffer value{}; bool acquired=false;
+    ~IndexBuffer(){if(acquired)PyBuffer_Release(&value);}
+    bool get(PyObject* object) {
+        if(PyObject_GetBuffer(object,&value,PyBUF_FORMAT|PyBUF_C_CONTIGUOUS)<0)return false;
+        acquired=true;
+        if(value.ndim!=1 || value.itemsize!=8 || !value.format ||
+           (std::strcmp(value.format,"q")!=0 && std::strcmp(value.format,"l")!=0)) {
+            PyErr_SetString(PyExc_TypeError,"native neighbours require native int64 vectors");return false;
+        }
+        return true;
+    }
+    const std::int64_t* data(){return static_cast<const std::int64_t*>(value.buf);}
+    Py_ssize_t size(){return value.len/8;}
+};
+
+PyObject* local_evaluate(PyObject*,PyObject* args) {
+    if(PyTuple_Size(args)!=11) {
+        PyErr_SetString(PyExc_TypeError,"invalid local RIMLS argument count");return nullptr;
+    }
+    Buffer b[6];IndexBuffer offsets,ids;
+    const int positions[]={0,1,2,5,6,7};
+    for(int i=0;i<6;++i)if(!b[i].get(PyTuple_GET_ITEM(args,positions[i]),i>=3))return nullptr;
+    if(!offsets.get(PyTuple_GET_ITEM(args,3)) || !ids.get(PyTuple_GET_ITEM(args,4)))return nullptr;
+    double R=PyFloat_AsDouble(PyTuple_GET_ITEM(args,8));
+    double sr=PyFloat_AsDouble(PyTuple_GET_ITEM(args,9));
+    double sn=PyFloat_AsDouble(PyTuple_GET_ITEM(args,10));
+    if(PyErr_Occurred())return nullptr;
+    if(!(R>0 && sr>0 && sn>0 && std::isfinite(R) && std::isfinite(sr) && std::isfinite(sn))) {
+        PyErr_SetString(PyExc_ValueError,"positive finite scales required");return nullptr;
+    }
+    const Py_ssize_t Q=b[0].size()/3,P=b[1].size()/3,N=ids.size();
+    bool derivatives=b[4].size()!=0 || b[5].size()!=0;
+    if(b[0].value.ndim!=2 || b[0].value.shape[1]!=3 ||
+       b[1].value.ndim!=2 || b[1].value.shape[1]!=3 ||
+       b[2].value.ndim!=2 || b[2].value.shape[1]!=3 || b[2].size()!=3*P ||
+       b[3].size()!=Q || offsets.size()!=Q+1 || N>PY_SSIZE_T_MAX/3 ||
+       (derivatives && (b[4].size()!=3*N || b[5].size()!=3*N))) {
+        PyErr_SetString(PyExc_ValueError,"inconsistent local RIMLS buffers");return nullptr;
+    }
+    const auto* ptr=offsets.data();const auto* ix=ids.data();
+    if(ptr[0]!=0 || ptr[Q]!=N) {
+        PyErr_SetString(PyExc_ValueError,"invalid neighbour offsets");return nullptr;
+    }
+    for(Py_ssize_t i=0;i<Q;++i) {
+        if(ptr[i]<0 || ptr[i+1]<ptr[i] || ptr[i+1]>N) {
+            PyErr_SetString(PyExc_ValueError,"invalid neighbour offsets");return nullptr;
+        }
+        for(auto j=ptr[i];j<ptr[i+1];++j)if(ix[j]<0 || ix[j]>=P || (j>ptr[i] && ix[j]<=ix[j-1])) {
+            PyErr_SetString(PyExc_ValueError,"invalid or unsorted neighbour index");return nullptr;
+        }
+    }
+    std::string error;
+    Py_BEGIN_ALLOW_THREADS
+    try {
+        std::vector<double> points,normals;
+        for(Py_ssize_t i=0;i<Q;++i) {
+            const Py_ssize_t start=ptr[i],count=ptr[i+1]-start;
+            points.resize(3*count);normals.resize(3*count);
+            for(Py_ssize_t j=0;j<count;++j)for(int k=0;k<3;++k) {
+                points[3*j+k]=b[1].data()[3*ix[start+j]+k];
+                normals[3*j+k]=b[2].data()[3*ix[start+j]+k];
+            }
+            evaluate<double>(b[0].data()+3*i,points.data(),normals.data(),nullptr,nullptr,nullptr,nullptr,
+                nullptr,nullptr,nullptr,nullptr,1,count,R,sr,sn,
+                derivatives ? b[4].data()+3*start : nullptr,
+                derivatives ? b[5].data()+3*start : nullptr,1,b[3].data()+i);
+        }
+    } catch(const std::exception& exc){error=exc.what();}
+    Py_END_ALLOW_THREADS
+    if(!error.empty()){PyErr_SetString(PyExc_ValueError,error.c_str());return nullptr;}
+    Py_RETURN_NONE;
+}
+
 PyObject* vjp(PyObject*,PyObject* args){return call(args,false);}
 PyObject* hvp(PyObject*,PyObject* args){return call(args,true);}
-PyMethodDef methods[]={{"values",values,METH_VARARGS,"역전파가 필요 없는 RIMLS 간격을 계산해요."},{"vjp",vjp,METH_VARARGS,"좌표와 법선의 역전파를 계산해요."},
+PyMethodDef methods[]={{"local_evaluate",local_evaluate,METH_VARARGS,"##r## Neighbour-only values and first derivatives."},{"values",values,METH_VARARGS,"역전파가 필요 없는 RIMLS 간격을 계산해요."},{"vjp",vjp,METH_VARARGS,"좌표와 법선의 역전파를 계산해요."},
                       {"hvp",hvp,METH_VARARGS,"헤시안 방향곱을 계산해요."},
                       {"hvp_batch",hvp_batch,METH_VARARGS,"여러 방향의 헤시안 곱에서 공통 계산을 공유해요."},
                       {"vjp_batch",vjp_batch,METH_VARARGS,"여러 역전파 가중치가 쌍별 편미분 계산을 공유해요."},
